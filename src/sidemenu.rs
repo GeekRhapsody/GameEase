@@ -1,5 +1,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
 
 use gtk::glib;
 use gtk::prelude::*;
@@ -10,6 +12,7 @@ use crate::gamepad::KeyboardDirection;
 
 const SIDE_MENU_WIDTH: i32 = 280;
 const VOLUME_STEP: f64 = 5.0;
+const MAX_VOLUME: f64 = 100.0;
 
 /// Action produced by activating a side menu row.
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -34,7 +37,14 @@ struct SideMenuState {
     audio: Option<SharedAudioController>,
     volume_scale: gtk::Scale,
     mute_image: gtk::Image,
+    audio_result_sender: Sender<AudioUiMessage>,
     updating_audio_widgets: Cell<bool>,
+    audio_snapshot_pending: Cell<bool>,
+}
+
+enum AudioUiMessage {
+    Snapshot(AudioSnapshot),
+    Error(String),
 }
 
 /// Slide-in side menu widget and gamepad selection controller.
@@ -103,55 +113,60 @@ impl SideMenuState {
             KeyboardDirection::Right => VOLUME_STEP,
             KeyboardDirection::Up | KeyboardDirection::Down => 0.0,
         };
-        let next = (self.volume_scale.value() + delta).clamp(0.0, 150.0);
+        let next = (self.volume_scale.value() + delta).clamp(0.0, MAX_VOLUME);
         self.set_volume_from_ui(next);
     }
 
     fn toggle_mute(&self) {
-        let Some(audio) = &self.audio else {
+        let Some(audio) = self.audio.clone() else {
             return;
         };
-        let Ok(controller) = audio.lock() else {
-            return;
-        };
+        let sender = self.audio_result_sender.clone();
 
-        if let Err(error) = controller.toggle_mute() {
-            eprintln!("Failed to toggle audio mute: {error:#}");
-            return;
-        }
-
-        self.refresh_audio_widgets();
+        thread::spawn(move || {
+            let result = with_audio_controller(&audio, |controller| {
+                controller.toggle_mute()?;
+                controller.get_snapshot()
+            });
+            send_audio_result(sender, result);
+        });
     }
 
     fn set_volume_from_ui(&self, value: f64) {
+        let value = value.clamp(0.0, MAX_VOLUME);
         self.updating_audio_widgets.set(true);
         self.volume_scale.set_value(value);
         self.updating_audio_widgets.set(false);
 
-        let Some(audio) = &self.audio else {
+        let Some(audio) = self.audio.clone() else {
             return;
         };
-        let Ok(controller) = audio.lock() else {
-            return;
-        };
+        let sender = self.audio_result_sender.clone();
 
-        if let Err(error) = controller.set_volume(value.round() as u8) {
-            eprintln!("Failed to set audio volume: {error:#}");
-        }
+        thread::spawn(move || {
+            let result = with_audio_controller(&audio, |controller| {
+                controller.set_volume(value.round() as u8)?;
+                controller.get_snapshot()
+            });
+            send_audio_result(sender, result);
+        });
     }
 
     fn refresh_audio_widgets(&self) {
-        let Some(audio) = &self.audio else {
+        if self.audio_snapshot_pending.get() {
             return;
-        };
-        let Ok(controller) = audio.lock() else {
-            return;
-        };
-
-        match controller.get_snapshot() {
-            Ok(snapshot) => self.apply_audio_snapshot(snapshot),
-            Err(error) => eprintln!("Failed to refresh audio state: {error:#}"),
         }
+
+        let Some(audio) = self.audio.clone() else {
+            return;
+        };
+        let sender = self.audio_result_sender.clone();
+        self.audio_snapshot_pending.set(true);
+
+        thread::spawn(move || {
+            let result = with_audio_controller(&audio, |controller| controller.get_snapshot());
+            send_audio_result(sender, result);
+        });
     }
 
     fn apply_audio_snapshot(&self, snapshot: AudioSnapshot) {
@@ -164,6 +179,15 @@ impl SideMenuState {
         } else {
             "audio-volume-high-symbolic"
         }));
+    }
+
+    fn handle_audio_message(&self, message: AudioUiMessage) {
+        self.audio_snapshot_pending.set(false);
+
+        match message {
+            AudioUiMessage::Snapshot(snapshot) => self.apply_audio_snapshot(snapshot),
+            AudioUiMessage::Error(error) => eprintln!("Failed to update audio state: {error}"),
+        }
     }
 }
 
@@ -197,7 +221,7 @@ pub fn build_sidemenu() -> SideMenu {
         .build();
 
     let volume_scale =
-        gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 150.0, VOLUME_STEP);
+        gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, MAX_VOLUME, VOLUME_STEP);
     volume_scale.set_draw_value(false);
     volume_scale.set_hexpand(true);
     volume_scale.set_sensitive(audio.is_some());
@@ -250,6 +274,7 @@ pub fn build_sidemenu() -> SideMenu {
     revealer.set_child(Some(&panel));
     revealer.set_reveal_child(false);
 
+    let (audio_result_sender, audio_result_receiver) = mpsc::channel();
     let state = Rc::new(SideMenuState {
         rows,
         row_kinds,
@@ -257,12 +282,15 @@ pub fn build_sidemenu() -> SideMenu {
         audio,
         volume_scale: volume_scale.clone(),
         mute_image: mute_image.clone(),
+        audio_result_sender,
         updating_audio_widgets: Cell::new(false),
+        audio_snapshot_pending: Cell::new(false),
     });
     state.rows[0].add_css_class("side-menu-selected");
 
     install_volume_handlers(&state, &volume_scale, &mute_button);
     state.refresh_audio_widgets();
+    install_audio_result_poll(&state, audio_result_receiver);
     install_audio_poll(&state);
 
     SideMenu { revealer, state }
@@ -339,6 +367,35 @@ fn install_audio_poll(state: &Rc<SideMenuState>) {
         state.refresh_audio_widgets();
         glib::ControlFlow::Continue
     });
+}
+
+fn install_audio_result_poll(state: &Rc<SideMenuState>, receiver: Receiver<AudioUiMessage>) {
+    let state = Rc::clone(state);
+    glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+        while let Ok(message) = receiver.try_recv() {
+            state.handle_audio_message(message);
+        }
+
+        glib::ControlFlow::Continue
+    });
+}
+
+fn with_audio_controller<T>(
+    audio: &SharedAudioController,
+    run: impl FnOnce(&AudioController) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let controller = audio
+        .lock()
+        .map_err(|_| anyhow::anyhow!("audio controller lock poisoned"))?;
+    run(&controller)
+}
+
+fn send_audio_result(sender: Sender<AudioUiMessage>, result: anyhow::Result<AudioSnapshot>) {
+    let message = match result {
+        Ok(snapshot) => AudioUiMessage::Snapshot(snapshot),
+        Err(error) => AudioUiMessage::Error(error.to_string()),
+    };
+    let _ = sender.send(message);
 }
 
 fn install_css() {

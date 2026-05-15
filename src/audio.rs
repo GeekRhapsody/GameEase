@@ -15,7 +15,7 @@ use pulse::volume::{ChannelVolumes, Volume};
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(3);
 const MAINLOOP_SLEEP: Duration = Duration::from_millis(5);
-const MAX_VOLUME_PERCENT: u8 = 150;
+const MAX_VOLUME_PERCENT: u8 = 100;
 
 /// Thread-shareable PulseAudio controller handle.
 pub type SharedAudioController = Arc<Mutex<AudioController>>;
@@ -23,7 +23,7 @@ pub type SharedAudioController = Arc<Mutex<AudioController>>;
 /// Current system output volume state.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct AudioSnapshot {
-    /// Output volume percentage, including overdrive up to 150%.
+    /// Output volume percentage.
     pub volume: u8,
     /// Whether the default output sink is muted.
     pub muted: bool,
@@ -62,7 +62,7 @@ impl AudioController {
         self.request(AudioCommand::GetSnapshot)
     }
 
-    /// Sets the default output volume, clamped to 0-150%.
+    /// Sets the default output volume, clamped to 0-100%.
     pub fn set_volume(&self, pct: u8) -> Result<()> {
         self.request(|response| AudioCommand::SetVolume(pct.min(MAX_VOLUME_PERCENT), response))
     }
