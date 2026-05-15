@@ -1,0 +1,14 @@
+[Unit]
+Description=GameEase overlay
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+ExecStart=/usr/local/bin/gameease
+Restart=on-failure
+RestartSec=3
+# Adjust this if your compositor uses a different Wayland socket.
+Environment=WAYLAND_DISPLAY=wayland-1
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,11 @@
+# GameEase uinput access rules.
+#
+# Install this file to:
+#   /etc/udev/rules.d/99-gameease.rules
+#
+# It creates a stable /dev/uinput node and grants members of the input group,
+# plus active local sessions via uaccess, permission to create the virtual
+# keyboard used by GameEase.
+
+KERNEL=="uinput", SUBSYSTEM=="misc", OPTIONS+="static_node=uinput"
+KERNEL=="uinput", MODE="0660", GROUP="input", TAG+="uaccess"

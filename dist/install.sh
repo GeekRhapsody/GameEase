@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BIN_SRC="$ROOT_DIR/target/release/gameease"
+BIN_DST="/usr/local/bin/gameease"
+UDEV_SRC="$ROOT_DIR/dist/99-gameease.rules"
+UDEV_DST="/etc/udev/rules.d/99-gameease.rules"
+SERVICE_SRC="$ROOT_DIR/dist/gameease.service"
+SERVICE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+SERVICE_DST="$SERVICE_DIR/gameease.service"
+
+step() {
+    printf '\n==> %s\n' "$1"
+}
+
+step "Building release binary"
+cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml"
+printf 'Built %s\n' "$BIN_SRC"
+
+step "Installing binary to $BIN_DST"
+sudo install -Dm755 "$BIN_SRC" "$BIN_DST"
+printf 'Installed %s\n' "$BIN_DST"
+
+step "Installing udev rule to $UDEV_DST"
+sudo install -Dm644 "$UDEV_SRC" "$UDEV_DST"
+sudo udevadm control --reload
+sudo udevadm trigger --subsystem-match=misc --attr-match=name=uinput || true
+printf 'Installed udev rule and reloaded udev\n'
+
+step "Installing systemd user unit to $SERVICE_DST"
+install -Dm644 "$SERVICE_SRC" "$SERVICE_DST"
+systemctl --user daemon-reload
+systemctl --user enable --now gameease.service
+printf 'Enabled and started gameease.service\n'
+
+cat <<'MSG'
+
+GameEase installation complete.
+
+If the overlay does not appear, check:
+  systemctl --user status gameease.service
+  journalctl --user -u gameease.service -e
+
+The unit defaults to WAYLAND_DISPLAY=wayland-1. Edit:
+  ~/.config/systemd/user/gameease.service
+if your compositor uses a different Wayland socket.
+MSG
