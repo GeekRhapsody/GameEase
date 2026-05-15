@@ -5,6 +5,7 @@ mod overlay;
 mod sidemenu;
 mod tray;
 mod uinput;
+mod wifi;
 
 use std::sync::mpsc;
 

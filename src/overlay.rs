@@ -80,6 +80,7 @@ pub fn build_window(
         gamepad_receiver,
         grab_sender.clone(),
     );
+    install_keyboard_entry_focus(&window, keyboard.widget(), &sidemenu, grab_sender.clone());
     install_sidemenu_toggle(
         &window,
         keyboard.widget(),
@@ -159,12 +160,18 @@ fn install_gamepad_toggle(
                     }
                 }
                 GamepadCommand::MoveSelection(direction) => {
-                    if keyboard.widget().get_visible() && !sidemenu.revealer().reveals_child() {
+                    let keyboard_accepts_gamepad = keyboard.widget().get_visible()
+                        && (!sidemenu.revealer().reveals_child()
+                            || sidemenu.is_keyboard_entry_active());
+                    if keyboard_accepts_gamepad {
                         keyboard.move_selection(direction);
                     }
                 }
                 GamepadCommand::ActivateSelection => {
-                    if keyboard.widget().get_visible() && !sidemenu.revealer().reveals_child() {
+                    let keyboard_accepts_gamepad = keyboard.widget().get_visible()
+                        && (!sidemenu.revealer().reveals_child()
+                            || sidemenu.is_keyboard_entry_active());
+                    if keyboard_accepts_gamepad {
                         keyboard.activate_selected();
                     }
                 }
@@ -173,6 +180,65 @@ fn install_gamepad_toggle(
 
         glib::ControlFlow::Continue
     })
+}
+
+fn install_keyboard_entry_focus(
+    window: &gtk::ApplicationWindow,
+    keyboard: &gtk::Grid,
+    sidemenu: &SideMenu,
+    grab_sender: Sender<GamepadGrabCommand>,
+) {
+    let window = window.clone();
+    let keyboard = keyboard.clone();
+    let sidemenu = sidemenu.clone();
+
+    let window_for_notify = window.clone();
+    let keyboard_for_notify = keyboard.clone();
+    let sidemenu_for_notify = sidemenu.clone();
+    let grab_sender_for_notify = grab_sender.clone();
+    sidemenu.connect_keyboard_entry_active_notify(move || {
+        update_keyboard_entry_focus(
+            &window_for_notify,
+            &keyboard_for_notify,
+            &sidemenu_for_notify,
+            &grab_sender_for_notify,
+        );
+    });
+
+    update_keyboard_entry_focus(&window, &keyboard, &sidemenu, &grab_sender);
+}
+
+fn update_keyboard_entry_focus(
+    window: &gtk::ApplicationWindow,
+    keyboard: &gtk::Grid,
+    sidemenu: &SideMenu,
+    grab_sender: &Sender<GamepadGrabCommand>,
+) {
+    if sidemenu.is_keyboard_entry_active() {
+        window.set_can_focus(true);
+        window.set_focusable(true);
+        window.set_keyboard_mode(KeyboardMode::OnDemand);
+        if !keyboard.get_visible() {
+            keyboard.set_visible(true);
+        }
+
+        update_overlay_visibility(window, keyboard, sidemenu.revealer(), grab_sender);
+        schedule_input_region_update(window, keyboard, sidemenu.revealer());
+
+        let sidemenu_for_idle = sidemenu.clone();
+        glib::idle_add_local_once(move || {
+            sidemenu_for_idle.focus_keyboard_entry();
+        });
+
+        let sidemenu_for_timeout = sidemenu.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
+            sidemenu_for_timeout.focus_keyboard_entry();
+        });
+    } else {
+        window.set_keyboard_mode(KeyboardMode::None);
+        window.set_focusable(false);
+        window.set_can_focus(false);
+    }
 }
 
 fn apply_keyboard_placement(keyboard: &gtk::Grid, placement: KeyboardPlacement) {
@@ -207,9 +273,12 @@ fn install_sidemenu_toggle(
         while let Ok(command) = sidemenu_receiver.try_recv() {
             match command {
                 SideMenuCommand::ToggleSideMenu => {
-                    sidemenu
-                        .revealer()
-                        .set_reveal_child(!sidemenu.revealer().reveals_child());
+                    let reveal = !sidemenu.revealer().reveals_child();
+                    if !reveal {
+                        sidemenu.close_subpanels();
+                    }
+
+                    sidemenu.revealer().set_reveal_child(reveal);
                     update_overlay_visibility(
                         &window,
                         &keyboard,
@@ -226,20 +295,44 @@ fn install_sidemenu_toggle(
                     );
                 }
                 SideMenuCommand::MoveSelection(direction) => {
-                    if sidemenu.revealer().reveals_child() {
+                    if sidemenu.revealer().reveals_child()
+                        && !(keyboard.get_visible() && sidemenu.is_keyboard_entry_active())
+                    {
                         sidemenu.move_selection(direction);
                     }
                 }
                 SideMenuCommand::ActivateSelection => {
                     if sidemenu.revealer().reveals_child()
-                        && sidemenu.activate_selected() == SideMenuAction::Quit
+                        && !(keyboard.get_visible() && sidemenu.is_keyboard_entry_active())
                     {
-                        let _ = grab_sender.send(GamepadGrabCommand::SetExclusive(false));
-                        if let Some(application) = window.application() {
-                            application.quit();
-                        } else {
-                            window.close();
+                        match sidemenu.activate_selected() {
+                            SideMenuAction::None => {}
+                            SideMenuAction::Quit => {
+                                let _ = grab_sender.send(GamepadGrabCommand::SetExclusive(false));
+                                if let Some(application) = window.application() {
+                                    application.quit();
+                                } else {
+                                    window.close();
+                                }
+                            }
                         }
+                        schedule_input_region_update(&window, &keyboard, sidemenu.revealer());
+                        schedule_delayed_input_region_update(
+                            &window,
+                            &keyboard,
+                            sidemenu.revealer(),
+                        );
+                    }
+                }
+                SideMenuCommand::Cancel => {
+                    if sidemenu.revealer().reveals_child() {
+                        sidemenu.cancel();
+                        schedule_input_region_update(&window, &keyboard, sidemenu.revealer());
+                        schedule_delayed_input_region_update(
+                            &window,
+                            &keyboard,
+                            sidemenu.revealer(),
+                        );
                     }
                 }
             }

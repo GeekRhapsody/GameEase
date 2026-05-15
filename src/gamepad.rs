@@ -52,6 +52,8 @@ pub enum SideMenuCommand {
     MoveSelection(KeyboardDirection),
     /// Activate the selected side menu row.
     ActivateSelection,
+    /// Cancel the active side menu sub-panel.
+    Cancel,
 }
 
 /// Side menu row currently focused by gamepad navigation.
@@ -270,6 +272,11 @@ fn update_button_state(
         }
         RawGamepadEvent::Press(Button::Start) => *start_pressed = true,
         RawGamepadEvent::Release(Button::Start) => *start_pressed = false,
+        RawGamepadEvent::Release(Button::East) => {
+            sidemenu_sender
+                .send(SideMenuCommand::Cancel)
+                .context("failed to send side menu cancel command")?;
+        }
         RawGamepadEvent::Press(Button::DPadUp) => update_focused_row(
             KeyboardDirection::Up,
             sidemenu_open,
@@ -343,12 +350,15 @@ fn update_focused_row(
 
     match direction {
         KeyboardDirection::Up => *focused_row_index = focused_row_index.saturating_sub(1),
-        KeyboardDirection::Down => *focused_row_index = (*focused_row_index + 1).min(3),
+        KeyboardDirection::Down => *focused_row_index = (*focused_row_index + 1).min(4),
         KeyboardDirection::Left | KeyboardDirection::Right => {}
     }
 
     *focused_row = match *focused_row_index {
         0 => FocusedRow::Volume,
+        1 => FocusedRow::Brightness,
+        2 => FocusedRow::Wifi,
+        3 => FocusedRow::Bluetooth,
         _ => FocusedRow::None,
     };
 
@@ -544,6 +554,7 @@ fn translate_evdev_key(
 fn button_from_evdev_key(key: Key) -> Option<Button> {
     match key {
         Key::BTN_SOUTH => Some(Button::South),
+        Key::BTN_EAST => Some(Button::East),
         Key::BTN_BACK => Some(Button::Select),
         Key::BTN_SELECT => Some(Button::Select),
         Key::BTN_START => Some(Button::Start),
@@ -574,6 +585,7 @@ fn mapped_axis_from_event(event: InputEvent, mapped_axes: &[(u32, Axis)]) -> Opt
 fn mapped_gamepad_buttons(gamepad: &Gamepad<'_>) -> Vec<(u32, Button)> {
     [
         Button::South,
+        Button::East,
         Button::Select,
         Button::Start,
         Button::DPadUp,

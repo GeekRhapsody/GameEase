@@ -15,6 +15,7 @@ gtk4-layer-shell = "0.8"
 gilrs = "0.11"
 libpulse-binding = "2"
 libpulse-glib-binding = "2"
-tokio = { version = "1", features = ["rt", "time"] }
+tokio = { version = "1", features = ["full"] }
 uinput = "0.1"
+zbus = { version = "4", features = ["tokio"] }
 ksni = { version = "0.3.4", default-features = false, features = ["blocking", "tokio"] }
