@@ -6,10 +6,8 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use evdev::{
-    AbsoluteAxisType, Device, EventType as EvdevEventType, InputEvent, InputEventKind, Key,
-};
-use gilrs::{Button, Event, EventType as GilrsEventType, Gamepad, Gilrs, LinuxGamepadExt};
+use evdev::{AbsoluteAxisType, Device, InputEvent, InputEventKind, Key};
+use gilrs::{Axis, Button, Event, EventType as GilrsEventType, Gamepad, Gilrs, LinuxGamepadExt};
 
 const F_GETFL: i32 = 3;
 const F_SETFL: i32 = 4;
@@ -54,6 +52,22 @@ pub enum SideMenuCommand {
     MoveSelection(KeyboardDirection),
     /// Activate the selected side menu row.
     ActivateSelection,
+}
+
+/// Side menu row currently focused by gamepad navigation.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[allow(dead_code)]
+pub enum FocusedRow {
+    /// Volume controls are focused.
+    Volume,
+    /// Brightness controls are focused.
+    Brightness,
+    /// Wi-Fi controls are focused.
+    Wifi,
+    /// Bluetooth controls are focused.
+    Bluetooth,
+    /// No feature row is focused.
+    None,
 }
 
 /// Commands sent from the GTK thread to control exclusive gamepad access.
@@ -109,6 +123,9 @@ async fn run_event_loop(
     let mut start_pressed = false;
     let mut osk_combo_armed = false;
     let mut sidemenu_combo_armed = false;
+    let mut sidemenu_open = false;
+    let mut focused_row_index = 0usize;
+    let mut focused_row = FocusedRow::None;
 
     loop {
         while let Ok(command) = grab_receiver.try_recv() {
@@ -173,6 +190,9 @@ async fn run_event_loop(
                 &mut start_pressed,
                 &mut osk_combo_armed,
                 &mut sidemenu_combo_armed,
+                &mut sidemenu_open,
+                &mut focused_row_index,
+                &mut focused_row,
                 &osk_sender,
                 &sidemenu_sender,
             )?;
@@ -204,6 +224,7 @@ fn reset_button_state(
 enum RawGamepadEvent {
     Press(Button),
     Release(Button),
+    MoveSelection(KeyboardDirection),
 }
 
 fn update_button_state(
@@ -215,6 +236,9 @@ fn update_button_state(
     start_pressed: &mut bool,
     osk_combo_armed: &mut bool,
     sidemenu_combo_armed: &mut bool,
+    sidemenu_open: &mut bool,
+    focused_row_index: &mut usize,
+    focused_row: &mut FocusedRow,
     osk_sender: &Sender<GamepadCommand>,
     sidemenu_sender: &Sender<SideMenuCommand>,
 ) -> Result<()> {
@@ -246,17 +270,28 @@ fn update_button_state(
         }
         RawGamepadEvent::Press(Button::Start) => *start_pressed = true,
         RawGamepadEvent::Release(Button::Start) => *start_pressed = false,
-        RawGamepadEvent::Press(Button::DPadUp) => {
-            send_selection_move(osk_sender, sidemenu_sender, KeyboardDirection::Up)?
-        }
-        RawGamepadEvent::Press(Button::DPadDown) => {
-            send_selection_move(osk_sender, sidemenu_sender, KeyboardDirection::Down)?
-        }
+        RawGamepadEvent::Press(Button::DPadUp) => update_focused_row(
+            KeyboardDirection::Up,
+            sidemenu_open,
+            focused_row_index,
+            focused_row,
+        )
+        .and_then(|_| send_selection_move(osk_sender, sidemenu_sender, KeyboardDirection::Up))?,
+        RawGamepadEvent::Press(Button::DPadDown) => update_focused_row(
+            KeyboardDirection::Down,
+            sidemenu_open,
+            focused_row_index,
+            focused_row,
+        )
+        .and_then(|_| send_selection_move(osk_sender, sidemenu_sender, KeyboardDirection::Down))?,
         RawGamepadEvent::Press(Button::DPadLeft) => {
             send_selection_move(osk_sender, sidemenu_sender, KeyboardDirection::Left)?
         }
         RawGamepadEvent::Press(Button::DPadRight) => {
             send_selection_move(osk_sender, sidemenu_sender, KeyboardDirection::Right)?
+        }
+        RawGamepadEvent::MoveSelection(direction) => {
+            send_selection_move(osk_sender, sidemenu_sender, direction)?
         }
         _ => {}
     }
@@ -277,6 +312,13 @@ fn update_button_state(
     if *start_pressed && *select_pressed && !*sidemenu_combo_armed {
         *sidemenu_combo_armed = true;
         *select_consumed = true;
+        *sidemenu_open = !*sidemenu_open;
+        *focused_row_index = 0;
+        *focused_row = if *sidemenu_open {
+            FocusedRow::Volume
+        } else {
+            FocusedRow::None
+        };
         sidemenu_sender
             .send(SideMenuCommand::ToggleSideMenu)
             .context("failed to send side menu toggle command")?;
@@ -285,6 +327,30 @@ fn update_button_state(
     if !*start_pressed || !*select_pressed {
         *sidemenu_combo_armed = false;
     }
+
+    Ok(())
+}
+
+fn update_focused_row(
+    direction: KeyboardDirection,
+    sidemenu_open: &bool,
+    focused_row_index: &mut usize,
+    focused_row: &mut FocusedRow,
+) -> Result<()> {
+    if !*sidemenu_open {
+        return Ok(());
+    }
+
+    match direction {
+        KeyboardDirection::Up => *focused_row_index = focused_row_index.saturating_sub(1),
+        KeyboardDirection::Down => *focused_row_index = (*focused_row_index + 1).min(3),
+        KeyboardDirection::Left | KeyboardDirection::Right => {}
+    }
+
+    *focused_row = match *focused_row_index {
+        0 => FocusedRow::Volume,
+        _ => FocusedRow::None,
+    };
 
     Ok(())
 }
@@ -298,8 +364,10 @@ struct GrabbedGamepad {
     path: PathBuf,
     device: Device,
     mapped_buttons: Vec<(u32, Button)>,
+    mapped_axes: Vec<(u32, Axis)>,
     dpad_x: i32,
     dpad_y: i32,
+    right_stick_x: i32,
 }
 
 impl GamepadGrabManager {
@@ -314,8 +382,10 @@ impl GamepadGrabManager {
                     path,
                     device,
                     mapped_buttons: mapped_gamepad_buttons(&gamepad),
+                    mapped_axes: mapped_gamepad_axes(&gamepad),
                     dpad_x: 0,
                     dpad_y: 0,
+                    right_stick_x: 0,
                 }),
                 Err(error) => {
                     eprintln!("Failed to grab gamepad device {}: {error}", path.display());
@@ -365,8 +435,10 @@ impl GamepadGrabManager {
                 translate_evdev_event(
                     event,
                     &grabbed.mapped_buttons,
+                    &grabbed.mapped_axes,
                     &mut grabbed.dpad_x,
                     &mut grabbed.dpad_y,
+                    &mut grabbed.right_stick_x,
                     &mut raw_events,
                 );
             }
@@ -405,6 +477,12 @@ fn raw_event_from_gilrs(event: GilrsEventType) -> Option<RawGamepadEvent> {
     match event {
         GilrsEventType::ButtonPressed(button, _) => Some(RawGamepadEvent::Press(button)),
         GilrsEventType::ButtonReleased(button, _) => Some(RawGamepadEvent::Release(button)),
+        GilrsEventType::AxisChanged(Axis::RightStickX, value, _) if value >= 0.65 => {
+            Some(RawGamepadEvent::MoveSelection(KeyboardDirection::Right))
+        }
+        GilrsEventType::AxisChanged(Axis::RightStickX, value, _) if value <= -0.65 => {
+            Some(RawGamepadEvent::MoveSelection(KeyboardDirection::Left))
+        }
         _ => None,
     }
 }
@@ -412,8 +490,10 @@ fn raw_event_from_gilrs(event: GilrsEventType) -> Option<RawGamepadEvent> {
 fn translate_evdev_event(
     event: InputEvent,
     mapped_buttons: &[(u32, Button)],
+    mapped_axes: &[(u32, Axis)],
     dpad_x: &mut i32,
     dpad_y: &mut i32,
+    right_stick_x: &mut i32,
     raw_events: &mut Vec<RawGamepadEvent>,
 ) {
     match event.kind() {
@@ -432,6 +512,12 @@ fn translate_evdev_event(
             Button::DPadDown,
             raw_events,
         ),
+        InputEventKind::AbsAxis(axis)
+            if mapped_axis_from_event(event, mapped_axes) == Some(Axis::RightStickX)
+                || axis == AbsoluteAxisType::ABS_RX =>
+        {
+            translate_right_stick_x(event.value(), right_stick_x, raw_events)
+        }
         _ => {}
     }
 }
@@ -477,6 +563,14 @@ fn mapped_button_from_event(event: InputEvent, mapped_buttons: &[(u32, Button)])
         .find_map(|(code, button)| (*code == event_code).then_some(*button))
 }
 
+fn mapped_axis_from_event(event: InputEvent, mapped_axes: &[(u32, Axis)]) -> Option<Axis> {
+    let event_code = packed_evdev_code(event);
+
+    mapped_axes
+        .iter()
+        .find_map(|(code, axis)| (*code == event_code).then_some(*axis))
+}
+
 fn mapped_gamepad_buttons(gamepad: &Gamepad<'_>) -> Vec<(u32, Button)> {
     [
         Button::South,
@@ -496,8 +590,49 @@ fn mapped_gamepad_buttons(gamepad: &Gamepad<'_>) -> Vec<(u32, Button)> {
     .collect()
 }
 
+fn mapped_gamepad_axes(gamepad: &Gamepad<'_>) -> Vec<(u32, Axis)> {
+    [Axis::RightStickX]
+        .into_iter()
+        .filter_map(|axis| gamepad.axis_code(axis).map(|code| (code.into_u32(), axis)))
+        .collect()
+}
+
 fn packed_evdev_code(event: InputEvent) -> u32 {
-    (u32::from(EvdevEventType::KEY.0) << 16) | u32::from(event.code())
+    (u32::from(event.event_type().0) << 16) | u32::from(event.code())
+}
+
+fn translate_right_stick_x(
+    value: i32,
+    previous_zone: &mut i32,
+    raw_events: &mut Vec<RawGamepadEvent>,
+) {
+    let next_zone = axis_zone(value);
+
+    if next_zone == *previous_zone {
+        return;
+    }
+
+    match next_zone {
+        zone if zone < 0 => {
+            raw_events.push(RawGamepadEvent::MoveSelection(KeyboardDirection::Left))
+        }
+        zone if zone > 0 => {
+            raw_events.push(RawGamepadEvent::MoveSelection(KeyboardDirection::Right))
+        }
+        _ => {}
+    }
+
+    *previous_zone = next_zone;
+}
+
+fn axis_zone(value: i32) -> i32 {
+    if value <= -16_000 || (1..=64).contains(&value) {
+        -1
+    } else if value >= 16_000 || (192..=255).contains(&value) {
+        1
+    } else {
+        0
+    }
 }
 
 fn translate_hat_axis(
