@@ -22,6 +22,8 @@ extern "C" {
 pub enum GamepadCommand {
     /// Toggle visibility of the on-screen keyboard.
     ToggleKeyboard,
+    /// Close the on-screen keyboard if it is visible.
+    CloseKeyboard,
     /// Move the on-screen keyboard between bottom and top positions.
     ToggleKeyboardPosition,
     /// Move the selected OSK key.
@@ -58,14 +60,14 @@ pub enum KeyboardDirection {
 pub enum SideMenuCommand {
     /// Toggle visibility of the side menu.
     ToggleSideMenu,
+    /// Close the side menu if it is visible.
+    CloseSideMenu,
     /// Move the selected side menu row.
     MoveSelection(KeyboardDirection),
     /// Activate the selected side menu row.
     ActivateSelection,
     /// Terminate the selected side menu item when supported.
     TerminateSelection,
-    /// Cancel the active side menu sub-panel.
-    Cancel,
 }
 
 /// Side menu row currently focused by gamepad navigation.
@@ -134,6 +136,8 @@ async fn run_event_loop(
     let mut exclusive_active = false;
     let mut south_pressed = false;
     let mut south_consumed = false;
+    let mut north_pressed = false;
+    let mut north_consumed = false;
     let mut select_pressed = false;
     let mut select_consumed = false;
     let mut start_pressed = false;
@@ -156,6 +160,8 @@ async fn run_event_loop(
                         reset_button_state(
                             &mut south_pressed,
                             &mut south_consumed,
+                            &mut north_pressed,
+                            &mut north_consumed,
                             &mut select_pressed,
                             &mut select_consumed,
                             &mut start_pressed,
@@ -173,6 +179,8 @@ async fn run_event_loop(
                         reset_button_state(
                             &mut south_pressed,
                             &mut south_consumed,
+                            &mut north_pressed,
+                            &mut north_consumed,
                             &mut select_pressed,
                             &mut select_consumed,
                             &mut start_pressed,
@@ -206,6 +214,8 @@ async fn run_event_loop(
                 event,
                 &mut south_pressed,
                 &mut south_consumed,
+                &mut north_pressed,
+                &mut north_consumed,
                 &mut select_pressed,
                 &mut select_consumed,
                 &mut start_pressed,
@@ -227,6 +237,8 @@ async fn run_event_loop(
 fn reset_button_state(
     south_pressed: &mut bool,
     south_consumed: &mut bool,
+    north_pressed: &mut bool,
+    north_consumed: &mut bool,
     select_pressed: &mut bool,
     select_consumed: &mut bool,
     start_pressed: &mut bool,
@@ -241,6 +253,8 @@ fn reset_button_state(
 
     *south_pressed = false;
     *south_consumed = false;
+    *north_pressed = false;
+    *north_consumed = false;
     *select_pressed = false;
     *select_consumed = false;
     *start_pressed = false;
@@ -260,6 +274,8 @@ fn update_button_state(
     event: RawGamepadEvent,
     south_pressed: &mut bool,
     south_consumed: &mut bool,
+    north_pressed: &mut bool,
+    north_consumed: &mut bool,
     select_pressed: &mut bool,
     select_consumed: &mut bool,
     start_pressed: &mut bool,
@@ -287,10 +303,16 @@ fn update_button_state(
             *south_pressed = false;
             *south_consumed = false;
         }
+        RawGamepadEvent::Press(Button::North) => *north_pressed = true,
         RawGamepadEvent::Release(Button::North) => {
-            osk_sender
-                .send(GamepadCommand::ActivateSpace)
-                .context("failed to send OSK space command")?;
+            if *north_pressed && !*north_consumed && !*select_pressed {
+                osk_sender
+                    .send(GamepadCommand::ActivateSpace)
+                    .context("failed to send OSK space command")?;
+            }
+
+            *north_pressed = false;
+            *north_consumed = false;
         }
         RawGamepadEvent::Release(Button::RightTrigger2) => {
             osk_sender
@@ -299,7 +321,7 @@ fn update_button_state(
         }
         RawGamepadEvent::Press(Button::Select) => *select_pressed = true,
         RawGamepadEvent::Release(Button::Select) => {
-            if *select_pressed && !*select_consumed && !*south_pressed && !*start_pressed {
+            if *select_pressed && !*select_consumed && !*south_pressed && !*north_pressed {
                 osk_sender
                     .send(GamepadCommand::ToggleKeyboardPosition)
                     .context("failed to send OSK position command")?;
@@ -332,9 +354,15 @@ fn update_button_state(
             }
         }
         RawGamepadEvent::Release(Button::East) => {
+            osk_sender
+                .send(GamepadCommand::CloseKeyboard)
+                .context("failed to send OSK close command")?;
             sidemenu_sender
-                .send(SideMenuCommand::Cancel)
-                .context("failed to send side menu cancel command")?;
+                .send(SideMenuCommand::CloseSideMenu)
+                .context("failed to send side menu close command")?;
+            *sidemenu_open = false;
+            *focused_row_index = 0;
+            *focused_row = FocusedRow::None;
         }
         RawGamepadEvent::Release(Button::West) => {
             osk_sender
@@ -383,9 +411,10 @@ fn update_button_state(
         *osk_combo_armed = false;
     }
 
-    if *start_pressed && *select_pressed && !*sidemenu_combo_armed {
+    if *select_pressed && *north_pressed && !*sidemenu_combo_armed {
         *sidemenu_combo_armed = true;
         *select_consumed = true;
+        *north_consumed = true;
         *sidemenu_open = !*sidemenu_open;
         *focused_row_index = 0;
         *focused_row = if *sidemenu_open {
@@ -398,7 +427,7 @@ fn update_button_state(
             .context("failed to send side menu toggle command")?;
     }
 
-    if !*start_pressed || !*select_pressed {
+    if !*select_pressed || !*north_pressed {
         *sidemenu_combo_armed = false;
     }
 

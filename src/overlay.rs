@@ -175,6 +175,23 @@ fn install_gamepad_toggle(
                     );
                     schedule_input_region_update(&window, keyboard.widget(), sidemenu.revealer());
                 }
+                GamepadCommand::CloseKeyboard => {
+                    if keyboard.widget().get_visible() {
+                        keyboard.set_shift_held(false);
+                        keyboard.widget().set_visible(false);
+                        update_overlay_visibility(
+                            &window,
+                            keyboard.widget(),
+                            sidemenu.revealer(),
+                            &grab_sender,
+                        );
+                        schedule_input_region_update(
+                            &window,
+                            keyboard.widget(),
+                            sidemenu.revealer(),
+                        );
+                    }
+                }
                 GamepadCommand::ToggleKeyboardPosition => {
                     if keyboard.widget().get_visible() {
                         toggle_keyboard_placement(
@@ -369,6 +386,32 @@ fn install_sidemenu_toggle(
                         &grab_sender,
                     );
                 }
+                SideMenuCommand::CloseSideMenu => {
+                    if sidemenu.revealer().reveals_child()
+                        || sidemenu.revealer().is_child_revealed()
+                    {
+                        sidemenu.close_subpanels();
+                        sidemenu.revealer().set_reveal_child(false);
+                        update_overlay_visibility(
+                            &window,
+                            &keyboard,
+                            sidemenu.revealer(),
+                            &grab_sender,
+                        );
+                        schedule_input_region_update(&window, &keyboard, sidemenu.revealer());
+                        schedule_delayed_input_region_update(
+                            &window,
+                            &keyboard,
+                            sidemenu.revealer(),
+                        );
+                        schedule_delayed_overlay_visibility_update(
+                            &window,
+                            &keyboard,
+                            sidemenu.revealer(),
+                            &grab_sender,
+                        );
+                    }
+                }
                 SideMenuCommand::MoveSelection(direction) => {
                     if sidemenu.revealer().reveals_child()
                         && !(keyboard.get_visible() && sidemenu.is_keyboard_entry_active())
@@ -430,17 +473,6 @@ fn install_sidemenu_toggle(
                         && !(keyboard.get_visible() && sidemenu.is_keyboard_entry_active())
                     {
                         sidemenu.terminate_selected();
-                    }
-                }
-                SideMenuCommand::Cancel => {
-                    if sidemenu.revealer().reveals_child() {
-                        sidemenu.cancel();
-                        schedule_input_region_update(&window, &keyboard, sidemenu.revealer());
-                        schedule_delayed_input_region_update(
-                            &window,
-                            &keyboard,
-                            sidemenu.revealer(),
-                        );
                     }
                 }
             }

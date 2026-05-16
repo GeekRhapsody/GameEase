@@ -89,7 +89,12 @@ const KEY_ROWS: &[&[KeySpec]] = &[
         KeySpec::toggle("Ctrl", Key::KEY_LEFTCTRL, 1),
         KeySpec::toggle("Meta", Key::KEY_LEFTMETA, 1),
         KeySpec::toggle("Alt", Key::KEY_LEFTALT, 1),
-        KeySpec::tap_icon("Space",Key::KEY_SPACE,8,"assets/Positional_Prompts_Up.png"),
+        KeySpec::tap_icon(
+            "Space",
+            Key::KEY_SPACE,
+            8,
+            "assets/Positional_Prompts_Up.png",
+        ),
         KeySpec::tap("←", Key::KEY_LEFT, 1),
         KeySpec::tap("↓", Key::KEY_DOWN, 1),
         KeySpec::tap("→", Key::KEY_RIGHT, 1),

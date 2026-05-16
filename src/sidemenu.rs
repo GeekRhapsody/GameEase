@@ -145,11 +145,6 @@ impl SideMenu {
         }
     }
 
-    /// Cancels the current side-menu sub-panel, if one is open.
-    pub fn cancel(&self) {
-        self.state.close_subpanels();
-    }
-
     /// Closes every side-menu sub-panel.
     pub fn close_subpanels(&self) {
         self.state.close_subpanels();
