@@ -178,9 +178,22 @@ fn install_gamepad_toggle(
                         keyboard.activate_selected();
                     }
                 }
+                GamepadCommand::ActivateSpace => {
+                    let keyboard_accepts_gamepad = keyboard.widget().get_visible()
+                        && (!sidemenu.revealer().reveals_child()
+                            || sidemenu.is_keyboard_entry_active());
+                    if keyboard_accepts_gamepad {
+                        keyboard.activate_space();
+                    }
+                }
                 GamepadCommand::SetShiftHeld(active) => {
                     if keyboard.widget().get_visible() || !active {
                         keyboard.set_shift_held(active);
+                    }
+                }
+                GamepadCommand::ToggleCapsLock => {
+                    if keyboard.widget().get_visible() {
+                        keyboard.toggle_caps_lock();
                     }
                 }
             }

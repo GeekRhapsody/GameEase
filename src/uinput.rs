@@ -83,6 +83,7 @@ impl VirtualKeyboard {
 fn supported_uinput_keys() -> &'static [Keyboard] {
     &[
         Keyboard::Key(keyboard::Key::Esc),
+        Keyboard::Key(keyboard::Key::Grave),
         Keyboard::Key(keyboard::Key::_1),
         Keyboard::Key(keyboard::Key::_2),
         Keyboard::Key(keyboard::Key::_3),
@@ -103,7 +104,11 @@ fn supported_uinput_keys() -> &'static [Keyboard] {
         Keyboard::Key(keyboard::Key::I),
         Keyboard::Key(keyboard::Key::O),
         Keyboard::Key(keyboard::Key::P),
+        Keyboard::Key(keyboard::Key::LeftBrace),
+        Keyboard::Key(keyboard::Key::RightBrace),
+        Keyboard::Key(keyboard::Key::BackSlash),
         Keyboard::Key(keyboard::Key::Tab),
+        Keyboard::Key(keyboard::Key::CapsLock),
         Keyboard::Key(keyboard::Key::A),
         Keyboard::Key(keyboard::Key::S),
         Keyboard::Key(keyboard::Key::D),
@@ -134,14 +139,16 @@ fn supported_uinput_keys() -> &'static [Keyboard] {
         Keyboard::Key(keyboard::Key::LeftMeta),
         Keyboard::Key(keyboard::Key::LeftAlt),
         Keyboard::Key(keyboard::Key::Left),
+        Keyboard::Key(keyboard::Key::Up),
+        Keyboard::Key(keyboard::Key::Down),
         Keyboard::Key(keyboard::Key::Right),
-        Keyboard::Misc(keyboard::Misc::MicMute),
     ]
 }
 
 fn to_uinput_key(key: Key) -> Result<Keyboard> {
     match key {
         Key::KEY_ESC => Ok(Keyboard::Key(keyboard::Key::Esc)),
+        Key::KEY_GRAVE => Ok(Keyboard::Key(keyboard::Key::Grave)),
         Key::KEY_1 => Ok(Keyboard::Key(keyboard::Key::_1)),
         Key::KEY_2 => Ok(Keyboard::Key(keyboard::Key::_2)),
         Key::KEY_3 => Ok(Keyboard::Key(keyboard::Key::_3)),
@@ -162,7 +169,11 @@ fn to_uinput_key(key: Key) -> Result<Keyboard> {
         Key::KEY_I => Ok(Keyboard::Key(keyboard::Key::I)),
         Key::KEY_O => Ok(Keyboard::Key(keyboard::Key::O)),
         Key::KEY_P => Ok(Keyboard::Key(keyboard::Key::P)),
+        Key::KEY_LEFTBRACE => Ok(Keyboard::Key(keyboard::Key::LeftBrace)),
+        Key::KEY_RIGHTBRACE => Ok(Keyboard::Key(keyboard::Key::RightBrace)),
+        Key::KEY_BACKSLASH => Ok(Keyboard::Key(keyboard::Key::BackSlash)),
         Key::KEY_TAB => Ok(Keyboard::Key(keyboard::Key::Tab)),
+        Key::KEY_CAPSLOCK => Ok(Keyboard::Key(keyboard::Key::CapsLock)),
         Key::KEY_A => Ok(Keyboard::Key(keyboard::Key::A)),
         Key::KEY_S => Ok(Keyboard::Key(keyboard::Key::S)),
         Key::KEY_D => Ok(Keyboard::Key(keyboard::Key::D)),
@@ -193,8 +204,9 @@ fn to_uinput_key(key: Key) -> Result<Keyboard> {
         Key::KEY_LEFTMETA => Ok(Keyboard::Key(keyboard::Key::LeftMeta)),
         Key::KEY_LEFTALT => Ok(Keyboard::Key(keyboard::Key::LeftAlt)),
         Key::KEY_LEFT => Ok(Keyboard::Key(keyboard::Key::Left)),
+        Key::KEY_UP => Ok(Keyboard::Key(keyboard::Key::Up)),
+        Key::KEY_DOWN => Ok(Keyboard::Key(keyboard::Key::Down)),
         Key::KEY_RIGHT => Ok(Keyboard::Key(keyboard::Key::Right)),
-        Key::KEY_MICMUTE => Ok(Keyboard::Misc(keyboard::Misc::MicMute)),
         _ => Err(anyhow!("unsupported OSK key code {}", key.code())),
     }
 }

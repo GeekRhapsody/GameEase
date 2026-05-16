@@ -28,8 +28,12 @@ pub enum GamepadCommand {
     MoveSelection(KeyboardDirection),
     /// Activate the selected OSK key.
     ActivateSelection,
+    /// Activate the Space key without changing OSK selection.
+    ActivateSpace,
     /// Hold or release the OSK Shift modifier from a physical gamepad trigger.
     SetShiftHeld(bool),
+    /// Toggle Caps Lock from the OSK/gamepad layer.
+    ToggleCapsLock,
 }
 
 /// Direction to move the selected OSK key.
@@ -279,6 +283,11 @@ fn update_button_state(
             *south_pressed = false;
             *south_consumed = false;
         }
+        RawGamepadEvent::Release(Button::North) => {
+            osk_sender
+                .send(GamepadCommand::ActivateSpace)
+                .context("failed to send OSK space command")?;
+        }
         RawGamepadEvent::Press(Button::Select) => *select_pressed = true,
         RawGamepadEvent::Release(Button::Select) => {
             if *select_pressed && !*select_consumed && !*south_pressed && !*start_pressed {
@@ -292,6 +301,11 @@ fn update_button_state(
         }
         RawGamepadEvent::Press(Button::Start) => *start_pressed = true,
         RawGamepadEvent::Release(Button::Start) => *start_pressed = false,
+        RawGamepadEvent::Press(Button::LeftThumb) => {
+            osk_sender
+                .send(GamepadCommand::ToggleCapsLock)
+                .context("failed to send OSK caps lock command")?;
+        }
         RawGamepadEvent::Press(Button::LeftTrigger2) => {
             if !*l2_pressed {
                 *l2_pressed = true;
@@ -613,7 +627,9 @@ fn button_from_evdev_key(key: Key) -> Option<Button> {
     match key {
         Key::BTN_SOUTH => Some(Button::South),
         Key::BTN_EAST => Some(Button::East),
+        Key::BTN_NORTH => Some(Button::North),
         Key::BTN_WEST => Some(Button::West),
+        Key::BTN_THUMBL => Some(Button::LeftThumb),
         Key::BTN_TL2 => Some(Button::LeftTrigger2),
         Key::BTN_BACK => Some(Button::Select),
         Key::BTN_SELECT => Some(Button::Select),
@@ -646,7 +662,9 @@ fn mapped_gamepad_buttons(gamepad: &Gamepad<'_>) -> Vec<(u32, Button)> {
     [
         Button::South,
         Button::East,
+        Button::North,
         Button::West,
+        Button::LeftThumb,
         Button::LeftTrigger2,
         Button::Select,
         Button::Start,
