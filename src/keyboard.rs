@@ -15,11 +15,10 @@ use crate::uinput::SharedVirtualKeyboard;
 
 const INITIAL_ROW: usize = 2;
 const INITIAL_COLUMN: usize = 6;
-const GAMEPAD_HINT_ICON_SIZE: i32 = 44;
+const GAMEPAD_HINT_ICON_SIZE: i32 = 40;
 
 const KEY_ROWS: &[&[KeySpec]] = &[
     &[
-        KeySpec::tap("Esc", Key::KEY_ESC, 2),
         KeySpec::tap_shift("`", "~", Key::KEY_GRAVE, 1),
         KeySpec::tap_shift("1", "!", Key::KEY_1, 1),
         KeySpec::tap_shift("2", "@", Key::KEY_2, 1),
@@ -31,7 +30,14 @@ const KEY_ROWS: &[&[KeySpec]] = &[
         KeySpec::tap_shift("8", "*", Key::KEY_8, 1),
         KeySpec::tap_shift("9", "(", Key::KEY_9, 1),
         KeySpec::tap_shift("0", ")", Key::KEY_0, 1),
-        KeySpec::tap("Back", Key::KEY_BACKSPACE, 2),
+        KeySpec::tap_shift("-", "_", Key::KEY_MINUS, 1),
+        KeySpec::tap_shift("=", "+", Key::KEY_EQUAL, 1),
+        KeySpec::tap_icon(
+            "Back",
+            Key::KEY_BACKSPACE,
+            2,
+            "assets/Positional_Prompts_Left.png",
+        ),
     ],
     &[
         KeySpec::tap("Tab", Key::KEY_TAB, 2),
@@ -62,7 +68,7 @@ const KEY_ROWS: &[&[KeySpec]] = &[
         KeySpec::tap_letter("l", "L", Key::KEY_L, 1),
         KeySpec::tap_shift(";", ":", Key::KEY_SEMICOLON, 1),
         KeySpec::tap_shift("'", "\"", Key::KEY_APOSTROPHE, 1),
-        KeySpec::tap("Enter", Key::KEY_ENTER, 2),
+        KeySpec::tap_icon("Enter", Key::KEY_ENTER, 2, "assets/RT.png"),
     ],
     &[
         KeySpec::toggle_icon("Shift", Key::KEY_LEFTSHIFT, 2, "assets/LT.png"),
@@ -76,23 +82,18 @@ const KEY_ROWS: &[&[KeySpec]] = &[
         KeySpec::tap_shift(",", "<", Key::KEY_COMMA, 1),
         KeySpec::tap_shift(".", ">", Key::KEY_DOT, 1),
         KeySpec::tap_shift("/", "?", Key::KEY_SLASH, 1),
+        KeySpec::tap("↑", Key::KEY_UP, 1),
         KeySpec::toggle_icon("Shift", Key::KEY_RIGHTSHIFT, 2, "assets/LT.png"),
     ],
     &[
         KeySpec::toggle("Ctrl", Key::KEY_LEFTCTRL, 1),
-        KeySpec::toggle("Super", Key::KEY_LEFTMETA, 1),
+        KeySpec::toggle("Meta", Key::KEY_LEFTMETA, 1),
         KeySpec::toggle("Alt", Key::KEY_LEFTALT, 1),
-        KeySpec::tap_icon(
-            "Space",
-            Key::KEY_SPACE,
-            6,
-            "assets/Positional_Prompts_Up.png",
-        ),
-        KeySpec::tap("<", Key::KEY_LEFT, 1),
-        KeySpec::tap("Up", Key::KEY_UP, 1),
-        KeySpec::tap("Dwn", Key::KEY_DOWN, 1),
-        KeySpec::tap(">", Key::KEY_RIGHT, 1),
-        KeySpec::move_keyboard("Move", 1),
+        KeySpec::tap_icon("Space",Key::KEY_SPACE,8,"assets/Positional_Prompts_Up.png"),
+        KeySpec::tap("←", Key::KEY_LEFT, 1),
+        KeySpec::tap("↓", Key::KEY_DOWN, 1),
+        KeySpec::tap("→", Key::KEY_RIGHT, 1),
+        KeySpec::move_keyboard("", 1),
     ],
 ];
 
@@ -515,6 +516,20 @@ impl OnScreenKeyboard {
             eprintln!("Failed to tap OSK space key: {error:#}");
         }
     }
+
+    /// Sends a Backspace key tap without changing the selected OSK key.
+    pub fn activate_backspace(&self) {
+        if let Err(error) = self.state.shift_state.tap_backspace() {
+            eprintln!("Failed to tap OSK backspace key: {error:#}");
+        }
+    }
+
+    /// Sends an Enter key tap without changing the selected OSK key.
+    pub fn activate_enter(&self) {
+        if let Err(error) = self.state.shift_state.tap_enter() {
+            eprintln!("Failed to tap OSK enter key: {error:#}");
+        }
+    }
 }
 
 impl KeyboardState {
@@ -715,6 +730,14 @@ impl ShiftState {
 
     fn tap_space(&self) -> anyhow::Result<()> {
         tap_key(&self.virtual_keyboard, Key::KEY_SPACE)
+    }
+
+    fn tap_backspace(&self) -> anyhow::Result<()> {
+        tap_key(&self.virtual_keyboard, Key::KEY_BACKSPACE)
+    }
+
+    fn tap_enter(&self) -> anyhow::Result<()> {
+        tap_key(&self.virtual_keyboard, Key::KEY_ENTER)
     }
 
     fn sync(&self) -> anyhow::Result<()> {

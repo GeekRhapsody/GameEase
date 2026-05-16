@@ -209,6 +209,22 @@ fn install_gamepad_toggle(
                         keyboard.activate_space();
                     }
                 }
+                GamepadCommand::ActivateBackspace => {
+                    let keyboard_accepts_gamepad = keyboard.widget().get_visible()
+                        && (!sidemenu.revealer().reveals_child()
+                            || sidemenu.is_keyboard_entry_active());
+                    if keyboard_accepts_gamepad {
+                        keyboard.activate_backspace();
+                    }
+                }
+                GamepadCommand::ActivateEnter => {
+                    let keyboard_accepts_gamepad = keyboard.widget().get_visible()
+                        && (!sidemenu.revealer().reveals_child()
+                            || sidemenu.is_keyboard_entry_active());
+                    if keyboard_accepts_gamepad {
+                        keyboard.activate_enter();
+                    }
+                }
                 GamepadCommand::SetShiftHeld(active) => {
                     if keyboard.widget().get_visible() || !active {
                         keyboard.set_shift_held(active);

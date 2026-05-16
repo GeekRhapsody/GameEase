@@ -30,6 +30,10 @@ pub enum GamepadCommand {
     ActivateSelection,
     /// Activate the Space key without changing OSK selection.
     ActivateSpace,
+    /// Activate the Backspace key without changing OSK selection.
+    ActivateBackspace,
+    /// Activate the Enter key without changing OSK selection.
+    ActivateEnter,
     /// Hold or release the OSK Shift modifier from a physical gamepad trigger.
     SetShiftHeld(bool),
     /// Toggle Caps Lock from the OSK/gamepad layer.
@@ -288,6 +292,11 @@ fn update_button_state(
                 .send(GamepadCommand::ActivateSpace)
                 .context("failed to send OSK space command")?;
         }
+        RawGamepadEvent::Release(Button::RightTrigger2) => {
+            osk_sender
+                .send(GamepadCommand::ActivateEnter)
+                .context("failed to send OSK enter command")?;
+        }
         RawGamepadEvent::Press(Button::Select) => *select_pressed = true,
         RawGamepadEvent::Release(Button::Select) => {
             if *select_pressed && !*select_consumed && !*south_pressed && !*start_pressed {
@@ -328,6 +337,9 @@ fn update_button_state(
                 .context("failed to send side menu cancel command")?;
         }
         RawGamepadEvent::Release(Button::West) => {
+            osk_sender
+                .send(GamepadCommand::ActivateBackspace)
+                .context("failed to send OSK backspace command")?;
             sidemenu_sender
                 .send(SideMenuCommand::TerminateSelection)
                 .context("failed to send side menu terminate command")?;
@@ -434,6 +446,7 @@ struct GrabbedGamepad {
     dpad_x: i32,
     dpad_y: i32,
     left_trigger_z: i32,
+    right_trigger_z: i32,
     right_stick_x: i32,
 }
 
@@ -453,6 +466,7 @@ impl GamepadGrabManager {
                     dpad_x: 0,
                     dpad_y: 0,
                     left_trigger_z: 0,
+                    right_trigger_z: 0,
                     right_stick_x: 0,
                 }),
                 Err(error) => {
@@ -507,6 +521,7 @@ impl GamepadGrabManager {
                     &mut grabbed.dpad_x,
                     &mut grabbed.dpad_y,
                     &mut grabbed.left_trigger_z,
+                    &mut grabbed.right_trigger_z,
                     &mut grabbed.right_stick_x,
                     &mut raw_events,
                 );
@@ -558,6 +573,12 @@ fn raw_event_from_gilrs(event: GilrsEventType) -> Option<RawGamepadEvent> {
         GilrsEventType::AxisChanged(Axis::LeftZ, value, _) if value <= 0.2 => {
             Some(RawGamepadEvent::Release(Button::LeftTrigger2))
         }
+        GilrsEventType::AxisChanged(Axis::RightZ, value, _) if value >= 0.5 => {
+            Some(RawGamepadEvent::Press(Button::RightTrigger2))
+        }
+        GilrsEventType::AxisChanged(Axis::RightZ, value, _) if value <= 0.2 => {
+            Some(RawGamepadEvent::Release(Button::RightTrigger2))
+        }
         _ => None,
     }
 }
@@ -569,6 +590,7 @@ fn translate_evdev_event(
     dpad_x: &mut i32,
     dpad_y: &mut i32,
     left_trigger_z: &mut i32,
+    right_trigger_z: &mut i32,
     right_stick_x: &mut i32,
     raw_events: &mut Vec<RawGamepadEvent>,
 ) {
@@ -579,6 +601,12 @@ fn translate_evdev_event(
                 || axis == AbsoluteAxisType::ABS_Z =>
         {
             translate_left_trigger(event.value(), left_trigger_z, raw_events)
+        }
+        InputEventKind::AbsAxis(axis)
+            if mapped_axis_from_event(event, mapped_axes) == Some(Axis::RightZ)
+                || axis == AbsoluteAxisType::ABS_RZ =>
+        {
+            translate_right_trigger(event.value(), right_trigger_z, raw_events)
         }
         InputEventKind::AbsAxis(AbsoluteAxisType::ABS_HAT0X) => translate_hat_axis(
             event.value(),
@@ -631,6 +659,7 @@ fn button_from_evdev_key(key: Key) -> Option<Button> {
         Key::BTN_WEST => Some(Button::West),
         Key::BTN_THUMBL => Some(Button::LeftThumb),
         Key::BTN_TL2 => Some(Button::LeftTrigger2),
+        Key::BTN_TR2 => Some(Button::RightTrigger2),
         Key::BTN_BACK => Some(Button::Select),
         Key::BTN_SELECT => Some(Button::Select),
         Key::BTN_START => Some(Button::Start),
@@ -666,6 +695,7 @@ fn mapped_gamepad_buttons(gamepad: &Gamepad<'_>) -> Vec<(u32, Button)> {
         Button::West,
         Button::LeftThumb,
         Button::LeftTrigger2,
+        Button::RightTrigger2,
         Button::Select,
         Button::Start,
         Button::DPadUp,
@@ -683,7 +713,7 @@ fn mapped_gamepad_buttons(gamepad: &Gamepad<'_>) -> Vec<(u32, Button)> {
 }
 
 fn mapped_gamepad_axes(gamepad: &Gamepad<'_>) -> Vec<(u32, Axis)> {
-    [Axis::LeftZ, Axis::RightStickX]
+    [Axis::LeftZ, Axis::RightZ, Axis::RightStickX]
         .into_iter()
         .filter_map(|axis| gamepad.axis_code(axis).map(|code| (code.into_u32(), axis)))
         .collect()
@@ -732,6 +762,26 @@ fn translate_left_trigger(
         raw_events.push(RawGamepadEvent::Press(Button::LeftTrigger2));
     } else {
         raw_events.push(RawGamepadEvent::Release(Button::LeftTrigger2));
+    }
+
+    *previous_zone = next_zone;
+}
+
+fn translate_right_trigger(
+    value: i32,
+    previous_zone: &mut i32,
+    raw_events: &mut Vec<RawGamepadEvent>,
+) {
+    let next_zone = trigger_zone(value);
+
+    if next_zone == *previous_zone {
+        return;
+    }
+
+    if next_zone > 0 {
+        raw_events.push(RawGamepadEvent::Press(Button::RightTrigger2));
+    } else {
+        raw_events.push(RawGamepadEvent::Release(Button::RightTrigger2));
     }
 
     *previous_zone = next_zone;
