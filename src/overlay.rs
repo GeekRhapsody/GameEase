@@ -1,3 +1,5 @@
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::sync::mpsc::{Receiver, Sender};
 
 use anyhow::Result;
@@ -53,7 +55,33 @@ pub fn build_window(
     window.set_exclusive_zone(0);
     window.set_keyboard_mode(KeyboardMode::None);
 
-    let keyboard = keyboard::build_keyboard(virtual_keyboard);
+    let sidemenu = sidemenu::build_sidemenu();
+    let keyboard_placement = Rc::new(Cell::new(KeyboardPlacement::Bottom));
+    let keyboard_widget = Rc::new(RefCell::new(None::<gtk::Grid>));
+    let move_keyboard = {
+        let window = window.clone();
+        let sidemenu_revealer = sidemenu.revealer().clone();
+        let keyboard_placement = keyboard_placement.clone();
+        let keyboard_widget = keyboard_widget.clone();
+
+        Rc::new(move || {
+            let Some(keyboard) = keyboard_widget.borrow().as_ref().cloned() else {
+                return;
+            };
+
+            if keyboard.get_visible() {
+                toggle_keyboard_placement(
+                    &window,
+                    &keyboard,
+                    &sidemenu_revealer,
+                    &keyboard_placement,
+                );
+            }
+        })
+    };
+
+    let keyboard = keyboard::build_keyboard(virtual_keyboard, move_keyboard);
+    keyboard_widget.replace(Some(keyboard.widget().clone()));
     keyboard.widget().set_visible(false);
     apply_keyboard_placement(keyboard.widget(), KeyboardPlacement::Bottom);
 
@@ -65,7 +93,6 @@ pub fn build_window(
         .build();
     main_child.add_css_class("gameease-transparent");
 
-    let sidemenu = sidemenu::build_sidemenu();
     let root = gtk::Overlay::builder().hexpand(true).vexpand(true).build();
     root.add_css_class("gameease-root");
     root.set_child(Some(&main_child));
@@ -79,6 +106,7 @@ pub fn build_window(
         &sidemenu,
         gamepad_receiver,
         grab_sender.clone(),
+        keyboard_placement,
     );
     install_keyboard_entry_focus(&window, keyboard.widget(), &sidemenu, grab_sender.clone());
     install_sidemenu_toggle(
@@ -123,11 +151,11 @@ fn install_gamepad_toggle(
     sidemenu: &SideMenu,
     gamepad_receiver: Receiver<GamepadCommand>,
     grab_sender: Sender<GamepadGrabCommand>,
+    keyboard_placement: Rc<Cell<KeyboardPlacement>>,
 ) -> glib::SourceId {
     let window = window.clone();
     let keyboard = keyboard.clone();
     let sidemenu = sidemenu.clone();
-    let keyboard_placement = std::rc::Rc::new(std::cell::Cell::new(KeyboardPlacement::Bottom));
 
     glib::idle_add_local(move || {
         while let Ok(command) = gamepad_receiver.try_recv() {
@@ -149,16 +177,11 @@ fn install_gamepad_toggle(
                 }
                 GamepadCommand::ToggleKeyboardPosition => {
                     if keyboard.widget().get_visible() {
-                        let next_placement = match keyboard_placement.get() {
-                            KeyboardPlacement::Bottom => KeyboardPlacement::Top,
-                            KeyboardPlacement::Top => KeyboardPlacement::Bottom,
-                        };
-                        keyboard_placement.set(next_placement);
-                        apply_keyboard_placement(keyboard.widget(), next_placement);
-                        schedule_input_region_update(
+                        toggle_keyboard_placement(
                             &window,
                             keyboard.widget(),
                             sidemenu.revealer(),
+                            &keyboard_placement,
                         );
                     }
                 }
@@ -277,6 +300,21 @@ fn apply_keyboard_placement(keyboard: &gtk::Grid, placement: KeyboardPlacement) 
             keyboard.set_margin_bottom(0);
         }
     }
+}
+
+fn toggle_keyboard_placement(
+    window: &gtk::ApplicationWindow,
+    keyboard: &gtk::Grid,
+    sidemenu: &gtk::Revealer,
+    keyboard_placement: &Cell<KeyboardPlacement>,
+) {
+    let next_placement = match keyboard_placement.get() {
+        KeyboardPlacement::Bottom => KeyboardPlacement::Top,
+        KeyboardPlacement::Top => KeyboardPlacement::Bottom,
+    };
+    keyboard_placement.set(next_placement);
+    apply_keyboard_placement(keyboard, next_placement);
+    schedule_input_region_update(window, keyboard, sidemenu);
 }
 
 fn install_sidemenu_toggle(

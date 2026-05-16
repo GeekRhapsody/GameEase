@@ -92,6 +92,7 @@ const KEY_ROWS: &[&[KeySpec]] = &[
         KeySpec::tap("Up", Key::KEY_UP, 1),
         KeySpec::tap("Dwn", Key::KEY_DOWN, 1),
         KeySpec::tap(">", Key::KEY_RIGHT, 1),
+        KeySpec::move_keyboard("Move", 1),
     ],
 ];
 
@@ -214,6 +215,18 @@ impl KeySpec {
         }
     }
 
+    const fn move_keyboard(label: &'static str, width: i32) -> Self {
+        Self {
+            label,
+            shifted_label: label,
+            caps_label: label,
+            shift_caps_label: label,
+            icon: Some("assets/Share.png"),
+            action: KeyAction::MoveKeyboard,
+            width,
+        }
+    }
+
     fn is_character(self) -> bool {
         matches!(self.action, KeyAction::Tap(_))
             && !matches!(
@@ -241,6 +254,7 @@ enum KeyAction {
     Tap(Key),
     Toggle(Key),
     CapsLock,
+    MoveKeyboard,
 }
 
 struct KeyboardKeymap {
@@ -760,7 +774,10 @@ impl ShiftState {
 }
 
 /// Builds the QWERTY on-screen keyboard widget.
-pub fn build_keyboard(virtual_keyboard: SharedVirtualKeyboard) -> OnScreenKeyboard {
+pub fn build_keyboard(
+    virtual_keyboard: SharedVirtualKeyboard,
+    move_keyboard: Rc<dyn Fn()>,
+) -> OnScreenKeyboard {
     install_css();
 
     let grid = gtk::Grid::builder()
@@ -818,6 +835,7 @@ pub fn build_keyboard(virtual_keyboard: SharedVirtualKeyboard) -> OnScreenKeyboa
                 *spec,
                 shift_state.clone(),
                 modifier_state_for_action(spec.action, &ctrl_active, &meta_active, &alt_active),
+                move_keyboard.clone(),
             );
 
             grid.attach(&button, column_index, row_index as i32, spec.width, 1);
@@ -888,6 +906,7 @@ fn connect_button(
     spec: KeySpec,
     shift_state: Rc<ShiftState>,
     modifier_active: Rc<Cell<bool>>,
+    move_keyboard: Rc<dyn Fn()>,
 ) {
     let action = spec.action;
 
@@ -906,6 +925,9 @@ fn connect_button(
             if let Err(error) = shift_state.toggle_caps_lock() {
                 eprintln!("Failed to toggle OSK caps lock: {error:#}");
             }
+        }
+        KeyAction::MoveKeyboard => {
+            move_keyboard();
         }
         KeyAction::Toggle(key) => {
             let next_active = !modifier_active.get();
