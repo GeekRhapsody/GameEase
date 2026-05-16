@@ -133,9 +133,12 @@ fn install_gamepad_toggle(
         while let Ok(command) = gamepad_receiver.try_recv() {
             match command {
                 GamepadCommand::ToggleKeyboard => {
-                    keyboard
-                        .widget()
-                        .set_visible(!keyboard.widget().get_visible());
+                    let next_visible = !keyboard.widget().get_visible();
+                    if !next_visible {
+                        keyboard.set_shift_held(false);
+                    }
+
+                    keyboard.widget().set_visible(next_visible);
                     update_overlay_visibility(
                         &window,
                         keyboard.widget(),
@@ -173,6 +176,11 @@ fn install_gamepad_toggle(
                             || sidemenu.is_keyboard_entry_active());
                     if keyboard_accepts_gamepad {
                         keyboard.activate_selected();
+                    }
+                }
+                GamepadCommand::SetShiftHeld(active) => {
+                    if keyboard.widget().get_visible() || !active {
+                        keyboard.set_shift_held(active);
                     }
                 }
             }
