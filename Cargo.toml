@@ -19,5 +19,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 uinput = "0.1"
+xkbcommon = { version = "0.9", default-features = false }
 zbus = { version = "4", features = ["tokio"] }
 ksni = { version = "0.3.4", default-features = false, features = ["blocking", "tokio"] }

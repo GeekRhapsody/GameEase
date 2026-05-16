@@ -1,10 +1,14 @@
 use std::cell::{Cell, RefCell};
+use std::env;
+use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 use std::rc::Rc;
 
 use evdev::Key;
 use gtk::prelude::*;
 use gtk4 as gtk;
+use xkbcommon::xkb;
 
 use crate::gamepad::KeyboardDirection;
 use crate::uinput::SharedVirtualKeyboard;
@@ -102,6 +106,19 @@ struct KeySpec {
     width: i32,
 }
 
+#[derive(Clone, Copy)]
+struct KeyChord {
+    key: Key,
+    shift: bool,
+    alt_gr: bool,
+}
+
+impl KeyChord {
+    const fn new(key: Key, shift: bool, alt_gr: bool) -> Self {
+        Self { key, shift, alt_gr }
+    }
+}
+
 impl KeySpec {
     const fn tap(label: &'static str, key: Key, width: i32) -> Self {
         Self {
@@ -196,6 +213,27 @@ impl KeySpec {
             width,
         }
     }
+
+    fn is_character(self) -> bool {
+        matches!(self.action, KeyAction::Tap(_))
+            && !matches!(
+                self.action,
+                KeyAction::Tap(Key::KEY_LEFT | Key::KEY_RIGHT | Key::KEY_UP | Key::KEY_DOWN)
+            )
+            && self.label.chars().count() == 1
+    }
+
+    fn is_letter(self) -> bool {
+        matches!(self.action, KeyAction::Tap(_))
+            && self.label.chars().count() == 1
+            && self
+                .label
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_lowercase())
+            && self.caps_label == self.shifted_label
+            && self.shift_caps_label == self.label
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -203,6 +241,192 @@ enum KeyAction {
     Tap(Key),
     Toggle(Key),
     CapsLock,
+}
+
+struct KeyboardKeymap {
+    keymap: Option<xkb::Keymap>,
+}
+
+impl KeyboardKeymap {
+    fn detect() -> Self {
+        let names = XkbNames::detect();
+        let keymap = build_keymap(&names).or_else(|| {
+            eprintln!(
+                "Failed to compile detected XKB keymap; falling back to libxkbcommon defaults"
+            );
+            build_keymap(&XkbNames::default())
+        });
+
+        Self { keymap }
+    }
+
+    fn resolve(&self, target: &str) -> Option<KeyChord> {
+        let keymap = self.keymap.as_ref()?;
+
+        for key in PRINTABLE_KEYS {
+            for (shift, alt_gr) in [(false, false), (true, false), (false, true), (true, true)] {
+                if key_outputs(keymap, *key, shift, alt_gr, target) {
+                    return Some(KeyChord::new(*key, shift, alt_gr));
+                }
+            }
+        }
+
+        None
+    }
+}
+
+#[derive(Default)]
+struct XkbNames {
+    model: String,
+    layout: String,
+    variant: String,
+    options: Option<String>,
+}
+
+impl XkbNames {
+    fn detect() -> Self {
+        let mut names = Self::default();
+
+        names.model = env::var("XKB_DEFAULT_MODEL")
+            .ok()
+            .or_else(|| localectl_value("X11 Model"))
+            .unwrap_or_default();
+        names.layout = env::var("GAMEEASE_KEYBOARD_LAYOUT")
+            .ok()
+            .or_else(|| env::var("XKB_DEFAULT_LAYOUT").ok())
+            .or_else(kde_layout_value)
+            .or_else(|| localectl_value("X11 Layout"))
+            .unwrap_or_default();
+        names.variant = env::var("XKB_DEFAULT_VARIANT")
+            .ok()
+            .or_else(kde_variant_value)
+            .or_else(|| localectl_value("X11 Variant"))
+            .unwrap_or_default();
+        names.options = env::var("XKB_DEFAULT_OPTIONS")
+            .ok()
+            .or_else(kde_options_value)
+            .or_else(|| localectl_value("X11 Options"));
+
+        names
+    }
+}
+
+const PRINTABLE_KEYS: &[Key] = &[
+    Key::KEY_GRAVE,
+    Key::KEY_1,
+    Key::KEY_2,
+    Key::KEY_3,
+    Key::KEY_4,
+    Key::KEY_5,
+    Key::KEY_6,
+    Key::KEY_7,
+    Key::KEY_8,
+    Key::KEY_9,
+    Key::KEY_0,
+    Key::KEY_MINUS,
+    Key::KEY_EQUAL,
+    Key::KEY_Q,
+    Key::KEY_W,
+    Key::KEY_E,
+    Key::KEY_R,
+    Key::KEY_T,
+    Key::KEY_Y,
+    Key::KEY_U,
+    Key::KEY_I,
+    Key::KEY_O,
+    Key::KEY_P,
+    Key::KEY_LEFTBRACE,
+    Key::KEY_RIGHTBRACE,
+    Key::KEY_A,
+    Key::KEY_S,
+    Key::KEY_D,
+    Key::KEY_F,
+    Key::KEY_G,
+    Key::KEY_H,
+    Key::KEY_J,
+    Key::KEY_K,
+    Key::KEY_L,
+    Key::KEY_SEMICOLON,
+    Key::KEY_APOSTROPHE,
+    Key::KEY_BACKSLASH,
+    Key::KEY_102ND,
+    Key::KEY_Z,
+    Key::KEY_X,
+    Key::KEY_C,
+    Key::KEY_V,
+    Key::KEY_B,
+    Key::KEY_N,
+    Key::KEY_M,
+    Key::KEY_COMMA,
+    Key::KEY_DOT,
+    Key::KEY_SLASH,
+];
+
+fn build_keymap(names: &XkbNames) -> Option<xkb::Keymap> {
+    let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+
+    xkb::Keymap::new_from_names(
+        &context,
+        "",
+        names.model.as_str(),
+        names.layout.as_str(),
+        names.variant.as_str(),
+        names.options.clone(),
+        xkb::KEYMAP_COMPILE_NO_FLAGS,
+    )
+}
+
+fn key_outputs(keymap: &xkb::Keymap, key: Key, shift: bool, alt_gr: bool, target: &str) -> bool {
+    let mut state = xkb::State::new(keymap);
+
+    if shift {
+        state.update_key(xkb_keycode(Key::KEY_LEFTSHIFT), xkb::KeyDirection::Down);
+    }
+    if alt_gr {
+        state.update_key(xkb_keycode(Key::KEY_RIGHTALT), xkb::KeyDirection::Down);
+    }
+
+    state.key_get_utf8(xkb_keycode(key)) == target
+}
+
+fn xkb_keycode(key: Key) -> xkb::Keycode {
+    xkb::Keycode::new(u32::from(key.code()) + 8)
+}
+
+fn kde_layout_value() -> Option<String> {
+    kde_config_value("LayoutList")
+}
+
+fn kde_variant_value() -> Option<String> {
+    kde_config_value("VariantList")
+}
+
+fn kde_options_value() -> Option<String> {
+    kde_config_value("Options")
+}
+
+fn kde_config_value(key: &str) -> Option<String> {
+    let home = env::var_os("HOME")?;
+    let path = PathBuf::from(home).join(".config/kxkbrc");
+    let contents = fs::read_to_string(path).ok()?;
+
+    contents.lines().find_map(|line| {
+        let (name, value) = line.split_once('=')?;
+        (name.trim() == key).then(|| value.trim().to_string())
+    })
+}
+
+fn localectl_value(key: &str) -> Option<String> {
+    let output = Command::new("localectl").arg("status").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let status = String::from_utf8_lossy(&output.stdout);
+    status.lines().find_map(|line| {
+        let (name, value) = line.trim().split_once(':')?;
+        (name.trim() == key).then(|| value.trim().to_string())
+    })
 }
 
 #[derive(Clone)]
@@ -330,6 +554,7 @@ struct KeyLabel {
 
 struct ShiftState {
     virtual_keyboard: SharedVirtualKeyboard,
+    keymap: KeyboardKeymap,
     toggle_active: Cell<bool>,
     held_active: Cell<bool>,
     caps_active: Cell<bool>,
@@ -343,6 +568,7 @@ impl ShiftState {
     fn new(virtual_keyboard: SharedVirtualKeyboard) -> Self {
         Self {
             virtual_keyboard,
+            keymap: KeyboardKeymap::detect(),
             toggle_active: Cell::new(false),
             held_active: Cell::new(false),
             caps_active: Cell::new(false),
@@ -402,6 +628,75 @@ impl ShiftState {
         self.update_visuals();
 
         Ok(())
+    }
+
+    fn tap_key_for_spec(&self, spec: KeySpec) -> anyhow::Result<()> {
+        let KeyAction::Tap(fallback_key) = spec.action else {
+            return Ok(());
+        };
+
+        let Some(target) = self.target_character(spec) else {
+            return tap_key(&self.virtual_keyboard, fallback_key);
+        };
+
+        let Some(chord) = self.keymap.resolve(target) else {
+            return tap_key(&self.virtual_keyboard, fallback_key);
+        };
+
+        if spec.is_letter() {
+            tap_key(&self.virtual_keyboard, chord.key)
+        } else {
+            self.tap_chord(chord)
+        }
+    }
+
+    fn target_character(&self, spec: KeySpec) -> Option<&'static str> {
+        if !spec.is_character() {
+            return None;
+        }
+
+        if spec.is_letter() {
+            Some(spec.label)
+        } else if self.is_active() && self.caps_active.get() {
+            Some(spec.shift_caps_label)
+        } else if self.is_active() {
+            Some(spec.shifted_label)
+        } else if self.caps_active.get() {
+            Some(spec.caps_label)
+        } else {
+            Some(spec.label)
+        }
+    }
+
+    fn tap_chord(&self, chord: KeyChord) -> anyhow::Result<()> {
+        let was_shift_down = self.injected_down.get();
+
+        self.set_temporary_modifier(Key::KEY_LEFTSHIFT, was_shift_down, chord.shift)?;
+        self.set_temporary_modifier(Key::KEY_RIGHTALT, false, chord.alt_gr)?;
+
+        let tap_result = tap_key(&self.virtual_keyboard, chord.key);
+        let restore_alt_gr = self.set_temporary_modifier(Key::KEY_RIGHTALT, chord.alt_gr, false);
+        let restore_shift =
+            self.set_temporary_modifier(Key::KEY_LEFTSHIFT, chord.shift, was_shift_down);
+
+        tap_result.and(restore_alt_gr).and(restore_shift)
+    }
+
+    fn set_temporary_modifier(
+        &self,
+        key: Key,
+        current_active: bool,
+        next_active: bool,
+    ) -> anyhow::Result<()> {
+        if current_active == next_active {
+            return Ok(());
+        }
+
+        if next_active {
+            press_key(&self.virtual_keyboard, key)
+        } else {
+            release_key(&self.virtual_keyboard, key)
+        }
     }
 
     fn tap_space(&self) -> anyhow::Result<()> {
@@ -520,7 +815,7 @@ pub fn build_keyboard(virtual_keyboard: SharedVirtualKeyboard) -> OnScreenKeyboa
             connect_button(
                 &button,
                 virtual_keyboard.clone(),
-                spec.action,
+                *spec,
                 shift_state.clone(),
                 modifier_state_for_action(spec.action, &ctrl_active, &meta_active, &alt_active),
             );
@@ -590,13 +885,15 @@ fn asset_path(relative_path: &str) -> PathBuf {
 fn connect_button(
     button: &gtk::Button,
     virtual_keyboard: SharedVirtualKeyboard,
-    action: KeyAction,
+    spec: KeySpec,
     shift_state: Rc<ShiftState>,
     modifier_active: Rc<Cell<bool>>,
 ) {
+    let action = spec.action;
+
     button.connect_clicked(move |button| match action {
-        KeyAction::Tap(key) => {
-            if let Err(error) = tap_key(&virtual_keyboard, key) {
+        KeyAction::Tap(_) => {
+            if let Err(error) = shift_state.tap_key_for_spec(spec) {
                 eprintln!("Failed to tap OSK key: {error:#}");
             }
         }

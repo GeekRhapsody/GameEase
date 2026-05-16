@@ -27,12 +27,13 @@ Install:
 - `libgtk-4-dev`
 - `libgtk4-layer-shell-dev`
 - `libudev-dev`
+- `libxkbcommon-dev`
 
 Package names vary by distribution. On Arch-based systems the native packages
 are typically:
 
 ```sh
-sudo pacman -S rust gtk4 gtk4-layer-shell systemd-libs
+sudo pacman -S rust gtk4 gtk4-layer-shell systemd-libs libxkbcommon
 ```
 
 ### One-line install
