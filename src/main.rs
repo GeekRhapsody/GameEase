@@ -3,6 +3,7 @@ mod gamepad;
 mod keyboard;
 mod overlay;
 mod sidemenu;
+mod tasks;
 mod tray;
 mod uinput;
 mod wifi;

@@ -307,6 +307,32 @@ fn install_sidemenu_toggle(
                     {
                         match sidemenu.activate_selected() {
                             SideMenuAction::None => {}
+                            SideMenuAction::CloseMenu => {
+                                sidemenu.close_subpanels();
+                                sidemenu.revealer().set_reveal_child(false);
+                                update_overlay_visibility(
+                                    &window,
+                                    &keyboard,
+                                    sidemenu.revealer(),
+                                    &grab_sender,
+                                );
+                                schedule_input_region_update(
+                                    &window,
+                                    &keyboard,
+                                    sidemenu.revealer(),
+                                );
+                                schedule_delayed_input_region_update(
+                                    &window,
+                                    &keyboard,
+                                    sidemenu.revealer(),
+                                );
+                                schedule_delayed_overlay_visibility_update(
+                                    &window,
+                                    &keyboard,
+                                    sidemenu.revealer(),
+                                    &grab_sender,
+                                );
+                            }
                             SideMenuAction::Quit => {
                                 let _ = grab_sender.send(GamepadGrabCommand::SetExclusive(false));
                                 if let Some(application) = window.application() {
@@ -322,6 +348,13 @@ fn install_sidemenu_toggle(
                             &keyboard,
                             sidemenu.revealer(),
                         );
+                    }
+                }
+                SideMenuCommand::TerminateSelection => {
+                    if sidemenu.revealer().reveals_child()
+                        && !(keyboard.get_visible() && sidemenu.is_keyboard_entry_active())
+                    {
+                        sidemenu.terminate_selected();
                     }
                 }
                 SideMenuCommand::Cancel => {

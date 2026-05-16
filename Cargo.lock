@@ -566,6 +566,8 @@ dependencies = [
  "ksni",
  "libpulse-binding",
  "libpulse-glib-binding",
+ "serde",
+ "serde_json",
  "tokio",
  "uinput",
  "zbus 4.4.0",

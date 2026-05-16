@@ -9,7 +9,8 @@ of window focus, and the OSK injects keys through Linux uinput.
 ## Target platform
 
 - Linux
-- wlroots-based Wayland compositor such as Sway or Hyprland
+- Wayland compositor with layer-shell support, including KDE Plasma/KWin, Sway,
+  and Hyprland
 - GTK4
 - `wlr-layer-shell`
 
@@ -54,7 +55,7 @@ different Wayland socket.
 
 ### Manual testing
 
-From a wlroots compositor such as Sway or Hyprland:
+From a supported Wayland compositor such as KDE Plasma/KWin, Sway, or Hyprland:
 
 ```sh
 cargo run
@@ -95,6 +96,7 @@ input. The grab is released again when both overlay surfaces are hidden.
 - GNOME is not supported.
 - Gamescope is untested.
 - The systemd unit assumes `WAYLAND_DISPLAY=wayland-1`.
+- The task switcher currently supports KDE Plasma/KWin, Sway, and Hyprland.
 
 ## Troubleshooting
 

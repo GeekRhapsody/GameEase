@@ -9,10 +9,12 @@ use gtk4 as gtk;
 
 use crate::audio::{AudioController, AudioSnapshot, SharedAudioController};
 use crate::gamepad::KeyboardDirection;
+use crate::tasks::{TaskEntry, TaskManager};
 use crate::wifi::{WifiEvent, WifiManager, WifiNetwork, WifiWorker};
 
 const SIDE_MENU_WIDTH: i32 = 280;
 const WIFI_PANEL_WIDTH: i32 = 360;
+const TASK_PANEL_WIDTH: i32 = 380;
 const VOLUME_STEP: f64 = 5.0;
 const MAX_VOLUME: f64 = 100.0;
 
@@ -21,6 +23,8 @@ const MAX_VOLUME: f64 = 100.0;
 pub enum SideMenuAction {
     /// The selected row does not need overlay-level handling.
     None,
+    /// Close the side menu after completing an action.
+    CloseMenu,
     /// Quit GameEase.
     Quit,
 }
@@ -30,6 +34,7 @@ enum SideMenuRowKind {
     Volume,
     Brightness,
     Wifi,
+    TaskSwitcher,
     Bluetooth,
     Quit,
 }
@@ -38,6 +43,7 @@ struct SideMenuState {
     revealer: gtk::Revealer,
     root_panel: gtk::Box,
     wifi_panel: gtk::Box,
+    task_panel: gtk::Box,
     rows: Vec<gtk::ListBoxRow>,
     row_kinds: Vec<SideMenuRowKind>,
     selected_index: Cell<usize>,
@@ -61,6 +67,11 @@ struct SideMenuState {
     wifi_selected_index: Cell<usize>,
     wifi_pending_ssid: RefCell<Option<String>>,
     wifi_connecting_ssid: RefCell<Option<String>>,
+    task_list: gtk::ListBox,
+    task_error_label: gtk::Label,
+    tasks: RefCell<Vec<TaskEntry>>,
+    task_rows: RefCell<Vec<gtk::ListBoxRow>>,
+    task_selected_index: Cell<usize>,
 }
 
 enum AudioUiMessage {
@@ -84,6 +95,11 @@ impl SideMenu {
     /// Moves the selected side menu row or adjusts the focused row value.
     pub fn move_selection(&self, direction: KeyboardDirection) {
         match direction {
+            KeyboardDirection::Up | KeyboardDirection::Down
+                if self.state.is_task_panel_open() && self.state.move_task_selection(direction) =>
+            {
+                return;
+            }
             KeyboardDirection::Up | KeyboardDirection::Down
                 if self.state.is_wifi_panel_open() && self.state.move_wifi_selection(direction) =>
             {
@@ -110,12 +126,20 @@ impl SideMenu {
 
     /// Activates the selected row and returns its action.
     pub fn activate_selected(&self) -> SideMenuAction {
+        if self.state.is_task_panel_open() {
+            return self.state.activate_task_selection();
+        }
+
         match self.state.selected_kind() {
             SideMenuRowKind::Volume => {
                 self.state.toggle_mute();
                 SideMenuAction::None
             }
             SideMenuRowKind::Wifi => self.state.activate_wifi_selection(),
+            SideMenuRowKind::TaskSwitcher => {
+                self.state.open_task_panel();
+                SideMenuAction::None
+            }
             SideMenuRowKind::Quit => SideMenuAction::Quit,
             SideMenuRowKind::Brightness | SideMenuRowKind::Bluetooth => SideMenuAction::None,
         }
@@ -123,12 +147,19 @@ impl SideMenu {
 
     /// Cancels the current side-menu sub-panel, if one is open.
     pub fn cancel(&self) {
-        self.state.close_wifi_panel();
+        self.state.close_subpanels();
     }
 
     /// Closes every side-menu sub-panel.
     pub fn close_subpanels(&self) {
-        self.state.close_wifi_panel();
+        self.state.close_subpanels();
+    }
+
+    /// Terminates the currently selected item when supported by the active panel.
+    pub fn terminate_selected(&self) {
+        if self.state.is_task_panel_open() {
+            self.state.terminate_task_selection();
+        }
     }
 
     /// Returns whether the side menu currently expects OSK text input.
@@ -246,6 +277,191 @@ impl SideMenuState {
         }
     }
 
+    fn open_task_panel(&self) {
+        if self.is_task_panel_open() {
+            return;
+        }
+
+        self.close_wifi_panel();
+        self.task_panel.set_visible(true);
+        self.root_panel
+            .set_width_request(SIDE_MENU_WIDTH + TASK_PANEL_WIDTH);
+        self.revealer
+            .set_width_request(SIDE_MENU_WIDTH + TASK_PANEL_WIDTH);
+        self.refresh_tasks();
+    }
+
+    fn close_task_panel(&self) {
+        if !self.is_task_panel_open() {
+            return;
+        }
+
+        self.task_panel.set_visible(false);
+        self.root_panel.set_width_request(SIDE_MENU_WIDTH);
+        self.revealer.set_width_request(SIDE_MENU_WIDTH);
+        self.rows[self.selected_index.get()].grab_focus();
+    }
+
+    fn close_subpanels(&self) {
+        self.close_wifi_panel();
+        self.close_task_panel();
+    }
+
+    fn refresh_tasks(&self) {
+        self.clear_task_error();
+
+        match TaskManager::list() {
+            Ok(tasks) => {
+                self.tasks.replace(tasks);
+                self.rebuild_task_rows();
+            }
+            Err(error) => {
+                self.tasks.replace(Vec::new());
+                self.rebuild_task_rows();
+                self.set_task_error(&error.to_string());
+            }
+        }
+    }
+
+    fn move_task_selection(&self, direction: KeyboardDirection) -> bool {
+        if !self.is_task_panel_open() {
+            return false;
+        }
+
+        let row_count = self.task_rows.borrow().len();
+        if row_count == 0 {
+            return true;
+        }
+
+        let current = self
+            .task_selected_index
+            .get()
+            .min(row_count.saturating_sub(1));
+        let next = match direction {
+            KeyboardDirection::Up if current > 0 => current - 1,
+            KeyboardDirection::Down if current + 1 < row_count => current + 1,
+            KeyboardDirection::Up | KeyboardDirection::Down => return true,
+            KeyboardDirection::Left | KeyboardDirection::Right => current,
+        };
+
+        self.set_task_selection(next);
+        true
+    }
+
+    fn activate_task_selection(&self) -> SideMenuAction {
+        let tasks = self.tasks.borrow();
+        if tasks.is_empty() {
+            drop(tasks);
+            self.refresh_tasks();
+            return SideMenuAction::None;
+        }
+
+        let index = self
+            .task_selected_index
+            .get()
+            .min(tasks.len().saturating_sub(1));
+        let Some(task) = tasks.get(index).cloned() else {
+            return SideMenuAction::None;
+        };
+        drop(tasks);
+
+        match TaskManager::focus(&task.id) {
+            Ok(()) => SideMenuAction::CloseMenu,
+            Err(error) => {
+                self.set_task_error(&error.to_string());
+                SideMenuAction::None
+            }
+        }
+    }
+
+    fn terminate_task_selection(&self) {
+        let tasks = self.tasks.borrow();
+        if tasks.is_empty() {
+            drop(tasks);
+            self.refresh_tasks();
+            return;
+        }
+
+        let index = self
+            .task_selected_index
+            .get()
+            .min(tasks.len().saturating_sub(1));
+        let Some(task) = tasks.get(index).cloned() else {
+            return;
+        };
+        drop(tasks);
+
+        match TaskManager::terminate(&task) {
+            Ok(()) => {
+                let mut tasks = self.tasks.borrow_mut();
+                if index < tasks.len() {
+                    tasks.remove(index);
+                }
+                drop(tasks);
+                self.rebuild_task_rows();
+            }
+            Err(error) => self.set_task_error(&error.to_string()),
+        }
+    }
+
+    fn rebuild_task_rows(&self) {
+        while let Some(child) = self.task_list.first_child() {
+            self.task_list.remove(&child);
+        }
+
+        let tasks = self.tasks.borrow();
+        let mut rows = Vec::new();
+
+        for task in tasks.iter() {
+            let row = build_task_row(task);
+            self.task_list.append(&row);
+            rows.push(row);
+        }
+
+        if rows.is_empty() {
+            let row = build_task_placeholder_row("No apps found");
+            self.task_list.append(&row);
+        }
+
+        self.task_rows.replace(rows);
+        let row_count = self.task_rows.borrow().len();
+        if row_count > 0 {
+            let index = self.task_selected_index.get().min(row_count - 1);
+            self.set_task_selection(index);
+        } else {
+            self.task_selected_index.set(0);
+        }
+    }
+
+    fn set_task_selection(&self, index: usize) {
+        let rows = self.task_rows.borrow();
+        if rows.is_empty() {
+            self.task_selected_index.set(0);
+            return;
+        }
+
+        let previous = self
+            .task_selected_index
+            .get()
+            .min(rows.len().saturating_sub(1));
+        rows[previous].remove_css_class("task-row-selected");
+
+        let next = index.min(rows.len().saturating_sub(1));
+        self.task_selected_index.set(next);
+        rows[next].add_css_class("task-row-selected");
+        rows[next].grab_focus();
+    }
+
+    fn set_task_error(&self, error: &str) {
+        self.task_error_label.set_text(error);
+        self.task_error_label.set_visible(true);
+    }
+
+    fn clear_task_error(&self) {
+        self.task_error_label.set_text("");
+        self.task_error_label.set_visible(false);
+    }
+
     fn scan_wifi(&self) {
         self.clear_wifi_error();
 
@@ -331,6 +547,7 @@ impl SideMenuState {
             return;
         }
 
+        self.close_task_panel();
         self.wifi_panel.set_visible(true);
         self.root_panel
             .set_width_request(SIDE_MENU_WIDTH + WIFI_PANEL_WIDTH);
@@ -544,6 +761,10 @@ impl SideMenuState {
     fn is_wifi_panel_open(&self) -> bool {
         self.wifi_panel.get_visible()
     }
+
+    fn is_task_panel_open(&self) -> bool {
+        self.task_panel.get_visible()
+    }
 }
 
 /// Builds the slide-in side menu revealer.
@@ -598,6 +819,7 @@ pub fn build_sidemenu() -> SideMenu {
     mute_button.add_css_class("side-menu-icon-button");
 
     let wifi_widgets = build_wifi_widgets(wifi_worker.is_some());
+    let task_widgets = build_task_widgets();
 
     let mut rows = Vec::new();
     let mut row_kinds = Vec::new();
@@ -617,6 +839,11 @@ pub fn build_sidemenu() -> SideMenu {
     list.append(&wifi_row);
     rows.push(wifi_row);
     row_kinds.push(SideMenuRowKind::Wifi);
+
+    let task_row = build_label_row("Task Switcher");
+    list.append(&task_row);
+    rows.push(task_row);
+    row_kinds.push(SideMenuRowKind::TaskSwitcher);
 
     for (label, kind) in [
         ("Bluetooth", SideMenuRowKind::Bluetooth),
@@ -645,6 +872,7 @@ pub fn build_sidemenu() -> SideMenu {
         .build();
     root_panel.append(&panel);
     root_panel.append(&wifi_widgets.panel);
+    root_panel.append(&task_widgets.panel);
 
     let revealer = gtk::Revealer::builder()
         .halign(gtk::Align::Start)
@@ -663,6 +891,7 @@ pub fn build_sidemenu() -> SideMenu {
         revealer: revealer.clone(),
         root_panel: root_panel.clone(),
         wifi_panel: wifi_widgets.panel.clone(),
+        task_panel: task_widgets.panel.clone(),
         rows,
         row_kinds,
         selected_index: Cell::new(0),
@@ -686,11 +915,17 @@ pub fn build_sidemenu() -> SideMenu {
         wifi_selected_index: Cell::new(0),
         wifi_pending_ssid: RefCell::new(None),
         wifi_connecting_ssid: RefCell::new(None),
+        task_list: task_widgets.list.clone(),
+        task_error_label: task_widgets.error_label.clone(),
+        tasks: RefCell::new(Vec::new()),
+        task_rows: RefCell::new(Vec::new()),
+        task_selected_index: Cell::new(0),
     });
     state.rows[0].add_css_class("side-menu-selected");
 
     install_volume_handlers(&state, &volume_scale, &mute_button);
     install_wifi_handlers(&state, &wifi_widgets);
+    install_task_handlers(&state, &task_widgets);
     state.refresh_audio_widgets();
     install_audio_result_poll(&state, audio_result_receiver);
     install_audio_poll(&state);
@@ -711,6 +946,13 @@ struct WifiWidgets {
     password_error: gtk::Label,
     connect_button: gtk::Button,
     cancel_button: gtk::Button,
+}
+
+struct TaskWidgets {
+    panel: gtk::Box,
+    list: gtk::ListBox,
+    error_label: gtk::Label,
+    refresh_button: gtk::Button,
 }
 
 fn build_volume_row(volume_scale: &gtk::Scale, mute_button: &gtk::Button) -> gtk::ListBoxRow {
@@ -877,6 +1119,74 @@ fn build_wifi_widgets(wifi_available: bool) -> WifiWidgets {
     }
 }
 
+fn build_task_widgets() -> TaskWidgets {
+    let icon = gtk::Image::from_icon_name("view-grid-symbolic");
+    let title = gtk::Label::builder()
+        .label("Task Switcher")
+        .halign(gtk::Align::Start)
+        .hexpand(true)
+        .build();
+    title.add_css_class("heading");
+
+    let header = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .build();
+    header.add_css_class("task-section-header");
+    header.append(&icon);
+    header.append(&title);
+
+    let list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .build();
+    list.add_css_class("task-list");
+
+    let error_label = gtk::Label::builder()
+        .halign(gtk::Align::Start)
+        .margin_top(4)
+        .visible(false)
+        .wrap(true)
+        .build();
+    error_label.add_css_class("task-error");
+
+    let refresh_button = gtk::Button::builder()
+        .can_focus(false)
+        .focusable(false)
+        .label("Refresh")
+        .build();
+    refresh_button.add_css_class("side-menu-action-button");
+
+    let content = gtk::Box::builder()
+        .margin_bottom(10)
+        .margin_end(10)
+        .margin_start(10)
+        .margin_top(10)
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(8)
+        .build();
+    content.append(&header);
+    content.append(&list);
+    content.append(&error_label);
+    content.append(&refresh_button);
+
+    let panel = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .vexpand(true)
+        .visible(false)
+        .width_request(TASK_PANEL_WIDTH)
+        .build();
+    panel.add_css_class("side-menu");
+    panel.add_css_class("task-panel");
+    panel.append(&content);
+
+    TaskWidgets {
+        panel,
+        list,
+        error_label,
+        refresh_button,
+    }
+}
+
 fn build_wifi_network_row(network: &WifiNetwork, connecting: bool) -> gtk::ListBoxRow {
     let signal = gtk::Image::from_icon_name(signal_icon_name(network.strength));
     let ssid_label = gtk::Label::builder()
@@ -923,6 +1233,78 @@ fn build_wifi_network_row(network: &WifiNetwork, connecting: bool) -> gtk::ListB
         .child(&row_box)
         .build();
     row.add_css_class("wifi-network-row");
+    row
+}
+
+fn build_task_row(task: &TaskEntry) -> gtk::ListBoxRow {
+    let icon = gtk::Image::from_icon_name("application-x-executable-symbolic");
+    let title = gtk::Label::builder()
+        .label(&task.title)
+        .halign(gtk::Align::Start)
+        .hexpand(true)
+        .wrap(true)
+        .build();
+
+    let subtitle_text = match task.pid {
+        Some(pid) if !task.app_id.is_empty() => format!("{} · pid {pid}", task.app_id),
+        Some(pid) => format!("pid {pid}"),
+        None => task.app_id.clone(),
+    };
+    let subtitle = gtk::Label::builder()
+        .label(&subtitle_text)
+        .halign(gtk::Align::Start)
+        .wrap(true)
+        .build();
+    subtitle.add_css_class("task-subtitle");
+
+    let labels = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .hexpand(true)
+        .spacing(2)
+        .build();
+    labels.append(&title);
+    if !subtitle_text.is_empty() {
+        labels.append(&subtitle);
+    }
+
+    let active = gtk::Label::builder()
+        .label("Active")
+        .visible(task.active)
+        .build();
+    active.add_css_class("task-active-badge");
+
+    let row_box = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .build();
+    row_box.append(&icon);
+    row_box.append(&labels);
+    row_box.append(&active);
+
+    let row = gtk::ListBoxRow::builder()
+        .activatable(true)
+        .can_focus(true)
+        .focusable(true)
+        .selectable(false)
+        .child(&row_box)
+        .build();
+    row.add_css_class("task-row");
+    row
+}
+
+fn build_task_placeholder_row(label: &str) -> gtk::ListBoxRow {
+    let row_label = gtk::Label::builder()
+        .label(label)
+        .halign(gtk::Align::Start)
+        .margin_bottom(6)
+        .margin_top(6)
+        .build();
+    let row = gtk::ListBoxRow::builder()
+        .activatable(false)
+        .selectable(false)
+        .child(&row_label)
+        .build();
+    row.add_css_class("task-placeholder-row");
     row
 }
 
@@ -1020,6 +1402,22 @@ fn install_wifi_handlers(state: &Rc<SideMenuState>, widgets: &WifiWidgets) {
     let state_for_cancel = Rc::clone(state);
     widgets.cancel_button.connect_clicked(move |_| {
         state_for_cancel.close_wifi_panel();
+    });
+}
+
+fn install_task_handlers(state: &Rc<SideMenuState>, widgets: &TaskWidgets) {
+    let state_for_refresh = Rc::clone(state);
+    widgets.refresh_button.connect_clicked(move |_| {
+        state_for_refresh.refresh_tasks();
+    });
+
+    let state_for_row = Rc::clone(state);
+    widgets.list.connect_row_activated(move |_, row| {
+        let index = row.index();
+        if index >= 0 {
+            state_for_row.set_task_selection(index as usize);
+            state_for_row.activate_task_selection();
+        }
     });
 }
 
@@ -1134,6 +1532,39 @@ fn install_css() {
         }
 
         .wifi-error {
+            color: #ffb4a8;
+        }
+
+        .task-section-header {
+            margin-bottom: 2px;
+        }
+
+        .task-list {
+            background: transparent;
+        }
+
+        .task-row,
+        .task-placeholder-row {
+            border-radius: 4px;
+            padding: 6px;
+        }
+
+        .task-row-selected {
+            background: rgba(255, 255, 255, 0.14);
+        }
+
+        .task-subtitle {
+            color: rgba(255, 255, 255, 0.68);
+            font-size: 12px;
+        }
+
+        .task-active-badge {
+            background: rgba(114, 199, 216, 0.24);
+            border-radius: 4px;
+            padding: 2px 5px;
+        }
+
+        .task-error {
             color: #ffb4a8;
         }
         ",

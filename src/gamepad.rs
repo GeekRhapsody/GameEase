@@ -52,6 +52,8 @@ pub enum SideMenuCommand {
     MoveSelection(KeyboardDirection),
     /// Activate the selected side menu row.
     ActivateSelection,
+    /// Terminate the selected side menu item when supported.
+    TerminateSelection,
     /// Cancel the active side menu sub-panel.
     Cancel,
 }
@@ -66,6 +68,8 @@ pub enum FocusedRow {
     Brightness,
     /// Wi-Fi controls are focused.
     Wifi,
+    /// Task switcher controls are focused.
+    TaskSwitcher,
     /// Bluetooth controls are focused.
     Bluetooth,
     /// No feature row is focused.
@@ -277,6 +281,11 @@ fn update_button_state(
                 .send(SideMenuCommand::Cancel)
                 .context("failed to send side menu cancel command")?;
         }
+        RawGamepadEvent::Release(Button::West) => {
+            sidemenu_sender
+                .send(SideMenuCommand::TerminateSelection)
+                .context("failed to send side menu terminate command")?;
+        }
         RawGamepadEvent::Press(Button::DPadUp) => update_focused_row(
             KeyboardDirection::Up,
             sidemenu_open,
@@ -350,7 +359,7 @@ fn update_focused_row(
 
     match direction {
         KeyboardDirection::Up => *focused_row_index = focused_row_index.saturating_sub(1),
-        KeyboardDirection::Down => *focused_row_index = (*focused_row_index + 1).min(4),
+        KeyboardDirection::Down => *focused_row_index = (*focused_row_index + 1).min(5),
         KeyboardDirection::Left | KeyboardDirection::Right => {}
     }
 
@@ -358,7 +367,8 @@ fn update_focused_row(
         0 => FocusedRow::Volume,
         1 => FocusedRow::Brightness,
         2 => FocusedRow::Wifi,
-        3 => FocusedRow::Bluetooth,
+        3 => FocusedRow::TaskSwitcher,
+        4 => FocusedRow::Bluetooth,
         _ => FocusedRow::None,
     };
 
@@ -555,6 +565,7 @@ fn button_from_evdev_key(key: Key) -> Option<Button> {
     match key {
         Key::BTN_SOUTH => Some(Button::South),
         Key::BTN_EAST => Some(Button::East),
+        Key::BTN_WEST => Some(Button::West),
         Key::BTN_BACK => Some(Button::Select),
         Key::BTN_SELECT => Some(Button::Select),
         Key::BTN_START => Some(Button::Start),
@@ -586,6 +597,7 @@ fn mapped_gamepad_buttons(gamepad: &Gamepad<'_>) -> Vec<(u32, Button)> {
     [
         Button::South,
         Button::East,
+        Button::West,
         Button::Select,
         Button::Start,
         Button::DPadUp,
