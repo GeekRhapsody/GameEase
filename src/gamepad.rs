@@ -19,6 +19,7 @@ const POINTER_MAX_SPEED: f32 = 18.0;
 const SCROLL_MAX_SPEED: f32 = 3.0;
 const DPAD_REPEAT_INITIAL_DELAY: Duration = Duration::from_millis(400);
 const DPAD_REPEAT_INTERVAL: Duration = Duration::from_millis(120);
+const SOUTH_LONG_PRESS: Duration = Duration::from_millis(600);
 
 extern "C" {
     fn fcntl(fd: i32, cmd: i32, ...) -> i32;
@@ -75,6 +76,10 @@ pub enum SideMenuCommand {
     MoveSelection(KeyboardDirection),
     /// Activate the selected side menu row.
     ActivateSelection,
+    /// Long-activate the selected side menu row.
+    LongActivateSelection,
+    /// Toggle scanning in the active side menu panel.
+    ToggleScan,
     /// Terminate the selected side menu item when supported.
     TerminateSelection,
 }
@@ -154,6 +159,7 @@ async fn run_event_loop(
     let mut exclusive_active = false;
     let mut south_pressed = false;
     let mut south_consumed = false;
+    let mut south_pressed_at = None::<Instant>;
     let mut north_pressed = false;
     let mut north_consumed = false;
     let mut select_pressed = false;
@@ -188,6 +194,7 @@ async fn run_event_loop(
             reset_button_state(
                 &mut south_pressed,
                 &mut south_consumed,
+                &mut south_pressed_at,
                 &mut north_pressed,
                 &mut north_consumed,
                 &mut select_pressed,
@@ -219,6 +226,7 @@ async fn run_event_loop(
                 event,
                 &mut south_pressed,
                 &mut south_consumed,
+                &mut south_pressed_at,
                 &mut north_pressed,
                 &mut north_consumed,
                 &mut select_pressed,
@@ -253,6 +261,7 @@ async fn run_event_loop(
             reset_button_state(
                 &mut south_pressed,
                 &mut south_consumed,
+                &mut south_pressed_at,
                 &mut north_pressed,
                 &mut north_consumed,
                 &mut select_pressed,
@@ -274,6 +283,7 @@ async fn run_event_loop(
 fn reset_button_state(
     south_pressed: &mut bool,
     south_consumed: &mut bool,
+    south_pressed_at: &mut Option<Instant>,
     north_pressed: &mut bool,
     north_consumed: &mut bool,
     select_pressed: &mut bool,
@@ -291,6 +301,7 @@ fn reset_button_state(
 
     *south_pressed = false;
     *south_consumed = false;
+    *south_pressed_at = None;
     *north_pressed = false;
     *north_consumed = false;
     *select_pressed = false;
@@ -314,6 +325,7 @@ fn update_button_state(
     event: RawGamepadEvent,
     south_pressed: &mut bool,
     south_consumed: &mut bool,
+    south_pressed_at: &mut Option<Instant>,
     north_pressed: &mut bool,
     north_consumed: &mut bool,
     select_pressed: &mut bool,
@@ -351,19 +363,31 @@ fn update_button_state(
         RawGamepadEvent::Press(Button::Start) => *start_pressed = true,
         RawGamepadEvent::Release(Button::Start) => *start_pressed = false,
         _ if desktop_mode.is_active() => desktop_mode.handle_event(event),
-        RawGamepadEvent::Press(Button::South) => *south_pressed = true,
+        RawGamepadEvent::Press(Button::South) => {
+            *south_pressed = true;
+            *south_pressed_at = Some(Instant::now());
+        }
         RawGamepadEvent::Release(Button::South) => {
             if *south_pressed && !*south_consumed && !*select_pressed {
                 osk_sender
                     .send(GamepadCommand::ActivateSelection)
                     .context("failed to send OSK activation command")?;
+                let command = if south_pressed_at
+                    .take()
+                    .is_some_and(|pressed_at| pressed_at.elapsed() >= SOUTH_LONG_PRESS)
+                {
+                    SideMenuCommand::LongActivateSelection
+                } else {
+                    SideMenuCommand::ActivateSelection
+                };
                 sidemenu_sender
-                    .send(SideMenuCommand::ActivateSelection)
+                    .send(command)
                     .context("failed to send side menu activation command")?;
             }
 
             *south_pressed = false;
             *south_consumed = false;
+            *south_pressed_at = None;
         }
         RawGamepadEvent::Press(Button::North) => *north_pressed = true,
         RawGamepadEvent::Release(Button::North) => {
@@ -371,6 +395,9 @@ fn update_button_state(
                 osk_sender
                     .send(GamepadCommand::ActivateSpace)
                     .context("failed to send OSK space command")?;
+                sidemenu_sender
+                    .send(SideMenuCommand::ToggleScan)
+                    .context("failed to send side menu scan command")?;
             }
 
             *north_pressed = false;
