@@ -9,6 +9,7 @@ use anyhow::{anyhow, Context, Result};
 use evdev::{AbsoluteAxisType, Device, InputEvent, InputEventKind, Key};
 use gilrs::{Axis, Button, Event, EventType as GilrsEventType, Gamepad, Gilrs, LinuxGamepadExt};
 
+use crate::config;
 use crate::uinput::{MouseButton, SharedVirtualKeyboard, SharedVirtualMouse};
 
 const F_GETFL: i32 = 3;
@@ -87,23 +88,25 @@ pub enum SideMenuCommand {
 pub enum FocusedRow {
     /// Volume controls are focused.
     Volume,
-    /// Brightness controls are focused.
-    Brightness,
     /// Wi-Fi controls are focused.
     Wifi,
     /// Task switcher controls are focused.
     TaskSwitcher,
     /// Bluetooth controls are focused.
     Bluetooth,
+    /// Configuration controls are focused.
+    Configuration,
     /// No feature row is focused.
     None,
 }
 
-/// Commands sent from the GTK thread to control exclusive gamepad access.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+/// Commands sent from the GTK thread to control gamepad-thread state.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GamepadGrabCommand {
     /// Enable or disable exclusive evdev grabs for connected gamepads.
     SetExclusive(bool),
+    /// Set the Desktop Mode mouse sensitivity multiplier.
+    SetDesktopMouseSensitivity(f32),
 }
 
 /// Spawns the focus-independent gamepad event loop on a background thread.
@@ -177,6 +180,9 @@ async fn run_event_loop(
                     exclusive_requested = enabled;
                 }
                 GamepadGrabCommand::SetExclusive(_) => {}
+                GamepadGrabCommand::SetDesktopMouseSensitivity(sensitivity) => {
+                    desktop_mode.set_mouse_sensitivity(sensitivity);
+                }
             }
         }
 
@@ -523,10 +529,10 @@ fn update_focused_row(
 
     *focused_row = match *focused_row_index {
         0 => FocusedRow::Volume,
-        1 => FocusedRow::Brightness,
-        2 => FocusedRow::Wifi,
-        3 => FocusedRow::TaskSwitcher,
-        4 => FocusedRow::Bluetooth,
+        1 => FocusedRow::Wifi,
+        2 => FocusedRow::TaskSwitcher,
+        3 => FocusedRow::Bluetooth,
+        4 => FocusedRow::Configuration,
         _ => FocusedRow::None,
     };
 
@@ -537,6 +543,7 @@ struct DesktopModeState {
     active: bool,
     virtual_keyboard: SharedVirtualKeyboard,
     virtual_mouse: SharedVirtualMouse,
+    mouse_sensitivity: f32,
     right_stick_x: f32,
     right_stick_y: f32,
     left_stick_y: f32,
@@ -554,6 +561,7 @@ impl DesktopModeState {
             active: false,
             virtual_keyboard,
             virtual_mouse,
+            mouse_sensitivity: config::DEFAULT_DESKTOP_MOUSE_SENSITIVITY,
             right_stick_x: 0.0,
             right_stick_y: 0.0,
             left_stick_y: 0.0,
@@ -568,6 +576,10 @@ impl DesktopModeState {
 
     fn is_active(&self) -> bool {
         self.active
+    }
+
+    fn set_mouse_sensitivity(&mut self, sensitivity: f32) {
+        self.mouse_sensitivity = config::sanitize_desktop_mouse_sensitivity(sensitivity);
     }
 
     fn set_active(&mut self, active: bool) {
@@ -645,8 +657,9 @@ impl DesktopModeState {
     }
 
     fn move_pointer(&mut self) {
-        let dx = accelerated_axis_delta(self.right_stick_x, 1.6, POINTER_MAX_SPEED);
-        let dy = accelerated_axis_delta(self.right_stick_y, 1.6, POINTER_MAX_SPEED);
+        let max_speed = POINTER_MAX_SPEED * self.mouse_sensitivity;
+        let dx = accelerated_axis_delta(self.right_stick_x, 1.6, max_speed);
+        let dy = accelerated_axis_delta(self.right_stick_y, 1.6, max_speed);
 
         if dx == 0 && dy == 0 {
             return;

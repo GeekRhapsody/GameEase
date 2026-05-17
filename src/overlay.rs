@@ -69,7 +69,7 @@ pub fn build_window(
     window.set_exclusive_zone(0);
     window.set_keyboard_mode(KeyboardMode::None);
 
-    let sidemenu = sidemenu::build_sidemenu();
+    let sidemenu = sidemenu::build_sidemenu(grab_sender.clone());
     let keyboard_placement = Rc::new(Cell::new(KeyboardPlacement::Bottom));
     let keyboard_widget = Rc::new(RefCell::new(None::<gtk::Grid>));
     let move_keyboard = {

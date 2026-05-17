@@ -1,5 +1,6 @@
 mod audio;
 mod bluetooth;
+mod config;
 mod gamepad;
 mod keyboard;
 mod overlay;

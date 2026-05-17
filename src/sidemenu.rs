@@ -9,7 +9,11 @@ use gtk4 as gtk;
 
 use crate::audio::{AudioController, AudioSnapshot, SharedAudioController};
 use crate::bluetooth::{BluetoothDevice, BluetoothEvent, BluetoothManager, BluetoothWorker};
-use crate::gamepad::KeyboardDirection;
+use crate::config::{
+    self, AppConfig, DESKTOP_MOUSE_SENSITIVITY_STEP, MAX_DESKTOP_MOUSE_SENSITIVITY,
+    MIN_DESKTOP_MOUSE_SENSITIVITY,
+};
+use crate::gamepad::{GamepadGrabCommand, KeyboardDirection};
 use crate::tasks::{TaskEntry, TaskManager};
 use crate::wifi::{WifiEvent, WifiManager, WifiNetwork, WifiWorker};
 
@@ -17,6 +21,7 @@ const SIDE_MENU_WIDTH: i32 = 280;
 const WIFI_PANEL_WIDTH: i32 = 360;
 const TASK_PANEL_WIDTH: i32 = 380;
 const BLUETOOTH_PANEL_WIDTH: i32 = 380;
+const CONFIG_PANEL_WIDTH: i32 = 380;
 const VOLUME_STEP: f64 = 5.0;
 const MAX_VOLUME: f64 = 100.0;
 
@@ -34,10 +39,10 @@ pub enum SideMenuAction {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum SideMenuRowKind {
     Volume,
-    Brightness,
     Wifi,
     TaskSwitcher,
     Bluetooth,
+    Configuration,
     Quit,
 }
 
@@ -47,6 +52,7 @@ struct SideMenuState {
     wifi_panel: gtk::Box,
     task_panel: gtk::Box,
     bluetooth_panel: gtk::Box,
+    config_panel: gtk::Box,
     rows: Vec<gtk::ListBoxRow>,
     row_kinds: Vec<SideMenuRowKind>,
     selected_index: Cell<usize>,
@@ -88,6 +94,10 @@ struct SideMenuState {
     bluetooth_action_selected_index: Cell<usize>,
     bluetooth_busy: Cell<bool>,
     bluetooth_popover_device: RefCell<Option<BluetoothDevice>>,
+    config: RefCell<AppConfig>,
+    config_sender: Sender<GamepadGrabCommand>,
+    desktop_sensitivity_scale: gtk::Scale,
+    updating_config_widgets: Cell<bool>,
 }
 
 enum AudioUiMessage {
@@ -113,6 +123,11 @@ impl SideMenu {
         match direction {
             KeyboardDirection::Up | KeyboardDirection::Down
                 if self.state.is_task_panel_open() && self.state.move_task_selection(direction) =>
+            {
+                return;
+            }
+            _ if self.state.is_config_panel_open()
+                && self.state.move_config_selection(direction) =>
             {
                 return;
             }
@@ -150,6 +165,9 @@ impl SideMenu {
         if self.state.is_task_panel_open() {
             return self.state.activate_task_selection();
         }
+        if self.state.is_config_panel_open() {
+            return SideMenuAction::None;
+        }
         if self.state.is_bluetooth_panel_open() {
             return self.state.activate_bluetooth_selection();
         }
@@ -168,8 +186,11 @@ impl SideMenu {
                 self.state.open_bluetooth_panel();
                 SideMenuAction::None
             }
+            SideMenuRowKind::Configuration => {
+                self.state.open_config_panel();
+                SideMenuAction::None
+            }
             SideMenuRowKind::Quit => SideMenuAction::Quit,
-            SideMenuRowKind::Brightness => SideMenuAction::None,
         }
     }
 
@@ -319,6 +340,7 @@ impl SideMenuState {
 
         self.close_wifi_panel();
         self.close_bluetooth_panel();
+        self.close_config_panel();
         self.task_panel.set_visible(true);
         self.root_panel
             .set_width_request(SIDE_MENU_WIDTH + TASK_PANEL_WIDTH);
@@ -342,6 +364,7 @@ impl SideMenuState {
         self.close_wifi_panel();
         self.close_task_panel();
         self.close_bluetooth_panel();
+        self.close_config_panel();
     }
 
     fn cancel_active_panel(&self) -> bool {
@@ -351,6 +374,10 @@ impl SideMenuState {
         }
         if self.is_bluetooth_panel_open() {
             self.close_bluetooth_panel();
+            return true;
+        }
+        if self.is_config_panel_open() {
+            self.close_config_panel();
             return true;
         }
         if self.is_wifi_panel_open() {
@@ -606,6 +633,7 @@ impl SideMenuState {
 
         self.close_task_panel();
         self.close_bluetooth_panel();
+        self.close_config_panel();
         self.wifi_panel.set_visible(true);
         self.root_panel
             .set_width_request(SIDE_MENU_WIDTH + WIFI_PANEL_WIDTH);
@@ -823,6 +851,7 @@ impl SideMenuState {
 
         self.close_wifi_panel();
         self.close_task_panel();
+        self.close_config_panel();
         self.bluetooth_panel.set_visible(true);
         self.root_panel
             .set_width_request(SIDE_MENU_WIDTH + BLUETOOTH_PANEL_WIDTH);
@@ -842,6 +871,75 @@ impl SideMenuState {
         self.root_panel.set_width_request(SIDE_MENU_WIDTH);
         self.revealer.set_width_request(SIDE_MENU_WIDTH);
         self.rows[self.selected_index.get()].grab_focus();
+    }
+
+    fn open_config_panel(&self) {
+        if self.is_config_panel_open() {
+            return;
+        }
+
+        self.close_wifi_panel();
+        self.close_task_panel();
+        self.close_bluetooth_panel();
+        self.config_panel.set_visible(true);
+        self.root_panel
+            .set_width_request(SIDE_MENU_WIDTH + CONFIG_PANEL_WIDTH);
+        self.revealer
+            .set_width_request(SIDE_MENU_WIDTH + CONFIG_PANEL_WIDTH);
+        self.desktop_sensitivity_scale.grab_focus();
+    }
+
+    fn close_config_panel(&self) {
+        if !self.is_config_panel_open() {
+            return;
+        }
+
+        self.config_panel.set_visible(false);
+        self.root_panel.set_width_request(SIDE_MENU_WIDTH);
+        self.revealer.set_width_request(SIDE_MENU_WIDTH);
+        self.rows[self.selected_index.get()].grab_focus();
+    }
+
+    fn move_config_selection(&self, direction: KeyboardDirection) -> bool {
+        if !self.is_config_panel_open() {
+            return false;
+        }
+
+        match direction {
+            KeyboardDirection::Left => self.adjust_desktop_mouse_sensitivity(-1.0),
+            KeyboardDirection::Right => self.adjust_desktop_mouse_sensitivity(1.0),
+            KeyboardDirection::Up | KeyboardDirection::Down => {}
+        }
+        true
+    }
+
+    fn adjust_desktop_mouse_sensitivity(&self, direction: f64) {
+        let step = f64::from(DESKTOP_MOUSE_SENSITIVITY_STEP);
+        let next = (self.desktop_sensitivity_scale.value() + direction * step).clamp(
+            f64::from(MIN_DESKTOP_MOUSE_SENSITIVITY),
+            f64::from(MAX_DESKTOP_MOUSE_SENSITIVITY),
+        );
+        self.set_desktop_mouse_sensitivity_from_ui(next);
+    }
+
+    fn set_desktop_mouse_sensitivity_from_ui(&self, value: f64) {
+        let sensitivity = config::sanitize_desktop_mouse_sensitivity(value as f32);
+        self.updating_config_widgets.set(true);
+        self.desktop_sensitivity_scale
+            .set_value(f64::from(sensitivity));
+        self.updating_config_widgets.set(false);
+
+        {
+            let mut config = self.config.borrow_mut();
+            config.desktop_mode.mouse_sensitivity = sensitivity;
+            if let Err(error) = config::save_config(&config) {
+                eprintln!("Failed to save GameEase configuration: {error:#}");
+            }
+        }
+
+        let _ = self
+            .config_sender
+            .send(GamepadGrabCommand::SetDesktopMouseSensitivity(sensitivity));
     }
 
     fn refresh_bluetooth(&self) {
@@ -1139,11 +1237,20 @@ impl SideMenuState {
     fn is_bluetooth_panel_open(&self) -> bool {
         self.bluetooth_panel.get_visible()
     }
+
+    fn is_config_panel_open(&self) -> bool {
+        self.config_panel.get_visible()
+    }
 }
 
 /// Builds the slide-in side menu revealer.
-pub fn build_sidemenu() -> SideMenu {
+pub fn build_sidemenu(config_sender: Sender<GamepadGrabCommand>) -> SideMenu {
     install_css();
+
+    let app_config = config::load_config_or_default();
+    let _ = config_sender.send(GamepadGrabCommand::SetDesktopMouseSensitivity(
+        app_config.desktop_mode.mouse_sensitivity,
+    ));
 
     let audio = match AudioController::new_shared() {
         Ok(audio) => Some(audio),
@@ -1203,6 +1310,7 @@ pub fn build_sidemenu() -> SideMenu {
     let wifi_widgets = build_wifi_widgets(wifi_worker.is_some());
     let task_widgets = build_task_widgets();
     let bluetooth_widgets = build_bluetooth_widgets();
+    let config_widgets = build_config_widgets(&app_config);
 
     let mut rows = Vec::new();
     let mut row_kinds = Vec::new();
@@ -1210,13 +1318,6 @@ pub fn build_sidemenu() -> SideMenu {
     list.append(&volume_row);
     rows.push(volume_row);
     row_kinds.push(SideMenuRowKind::Volume);
-
-    for (label, kind) in [("Brightness", SideMenuRowKind::Brightness)] {
-        let row = build_label_row(label);
-        list.append(&row);
-        rows.push(row);
-        row_kinds.push(kind);
-    }
 
     let wifi_row = build_label_row("Wi-Fi");
     list.append(&wifi_row);
@@ -1228,10 +1329,17 @@ pub fn build_sidemenu() -> SideMenu {
     rows.push(task_row);
     row_kinds.push(SideMenuRowKind::TaskSwitcher);
 
-    for (label, kind) in [
-        ("Bluetooth", SideMenuRowKind::Bluetooth),
-        ("Quit", SideMenuRowKind::Quit),
-    ] {
+    let bluetooth_row = build_label_row("Bluetooth");
+    list.append(&bluetooth_row);
+    rows.push(bluetooth_row);
+    row_kinds.push(SideMenuRowKind::Bluetooth);
+
+    let config_row = build_label_row("Configuration");
+    list.append(&config_row);
+    rows.push(config_row);
+    row_kinds.push(SideMenuRowKind::Configuration);
+
+    for (label, kind) in [("Quit", SideMenuRowKind::Quit)] {
         let row = build_label_row(label);
         list.append(&row);
         rows.push(row);
@@ -1257,6 +1365,7 @@ pub fn build_sidemenu() -> SideMenu {
     root_panel.append(&wifi_widgets.panel);
     root_panel.append(&task_widgets.panel);
     root_panel.append(&bluetooth_widgets.panel);
+    root_panel.append(&config_widgets.panel);
 
     let revealer = gtk::Revealer::builder()
         .halign(gtk::Align::Start)
@@ -1277,6 +1386,7 @@ pub fn build_sidemenu() -> SideMenu {
         wifi_panel: wifi_widgets.panel.clone(),
         task_panel: task_widgets.panel.clone(),
         bluetooth_panel: bluetooth_widgets.panel.clone(),
+        config_panel: config_widgets.panel.clone(),
         rows,
         row_kinds,
         selected_index: Cell::new(0),
@@ -1318,6 +1428,10 @@ pub fn build_sidemenu() -> SideMenu {
         bluetooth_action_selected_index: Cell::new(0),
         bluetooth_busy: Cell::new(false),
         bluetooth_popover_device: RefCell::new(None),
+        config: RefCell::new(app_config),
+        config_sender,
+        desktop_sensitivity_scale: config_widgets.desktop_sensitivity_scale.clone(),
+        updating_config_widgets: Cell::new(false),
     });
     state.rows[0].add_css_class("side-menu-selected");
 
@@ -1325,6 +1439,7 @@ pub fn build_sidemenu() -> SideMenu {
     install_wifi_handlers(&state, &wifi_widgets);
     install_task_handlers(&state, &task_widgets);
     install_bluetooth_handlers(&state, &bluetooth_widgets);
+    install_config_handlers(&state, &config_widgets);
     state.refresh_audio_widgets();
     install_audio_result_poll(&state, audio_result_receiver);
     install_audio_poll(&state);
@@ -1363,6 +1478,11 @@ struct BluetoothWidgets {
     action_popover: gtk::Popover,
     disconnect_button: gtk::Button,
     remove_button: gtk::Button,
+}
+
+struct ConfigWidgets {
+    panel: gtk::Box,
+    desktop_sensitivity_scale: gtk::Scale,
 }
 
 fn build_volume_row(volume_scale: &gtk::Scale, mute_button: &gtk::Button) -> gtk::ListBoxRow {
@@ -1696,6 +1816,86 @@ fn build_bluetooth_widgets() -> BluetoothWidgets {
         disconnect_button,
         remove_button,
     }
+}
+
+fn build_config_widgets(config: &AppConfig) -> ConfigWidgets {
+    let title = gtk::Label::builder()
+        .label("Configuration")
+        .halign(gtk::Align::Start)
+        .build();
+    title.add_css_class("heading");
+
+    let general_group = build_config_group("General");
+
+    let desktop_sensitivity_scale = gtk::Scale::with_range(
+        gtk::Orientation::Horizontal,
+        f64::from(MIN_DESKTOP_MOUSE_SENSITIVITY),
+        f64::from(MAX_DESKTOP_MOUSE_SENSITIVITY),
+        f64::from(DESKTOP_MOUSE_SENSITIVITY_STEP),
+    );
+    desktop_sensitivity_scale.set_digits(2);
+    desktop_sensitivity_scale.set_draw_value(true);
+    desktop_sensitivity_scale.set_hexpand(true);
+    desktop_sensitivity_scale.set_value(f64::from(config.desktop_mode.mouse_sensitivity));
+
+    let sensitivity_label = gtk::Label::builder()
+        .label("Mouse sensitivity")
+        .halign(gtk::Align::Start)
+        .hexpand(true)
+        .build();
+
+    let sensitivity_row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .build();
+    sensitivity_row.append(&sensitivity_label);
+    sensitivity_row.append(&desktop_sensitivity_scale);
+
+    let desktop_group = build_config_group("Desktop Mode");
+    desktop_group.append(&sensitivity_row);
+
+    let content = gtk::Box::builder()
+        .margin_bottom(10)
+        .margin_end(10)
+        .margin_start(10)
+        .margin_top(10)
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(12)
+        .build();
+    content.append(&title);
+    content.append(&general_group);
+    content.append(&desktop_group);
+
+    let panel = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .vexpand(true)
+        .visible(false)
+        .width_request(CONFIG_PANEL_WIDTH)
+        .build();
+    panel.add_css_class("side-menu");
+    panel.add_css_class("config-panel");
+    panel.append(&content);
+
+    ConfigWidgets {
+        panel,
+        desktop_sensitivity_scale,
+    }
+}
+
+fn build_config_group(title: &str) -> gtk::Box {
+    let label = gtk::Label::builder()
+        .label(title)
+        .halign(gtk::Align::Start)
+        .build();
+    label.add_css_class("config-group-title");
+
+    let group = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(8)
+        .build();
+    group.add_css_class("config-group");
+    group.append(&label);
+    group
 }
 
 fn build_wifi_network_row(network: &WifiNetwork, connecting: bool) -> gtk::ListBoxRow {
@@ -2044,6 +2244,19 @@ fn install_bluetooth_handlers(state: &Rc<SideMenuState>, widgets: &BluetoothWidg
     });
 }
 
+fn install_config_handlers(state: &Rc<SideMenuState>, widgets: &ConfigWidgets) {
+    let state_for_sensitivity = Rc::clone(state);
+    widgets
+        .desktop_sensitivity_scale
+        .connect_value_changed(move |scale| {
+            if state_for_sensitivity.updating_config_widgets.get() {
+                return;
+            }
+
+            state_for_sensitivity.set_desktop_mouse_sensitivity_from_ui(scale.value());
+        });
+}
+
 fn install_audio_poll(state: &Rc<SideMenuState>) {
     let state = Rc::clone(state);
     glib::timeout_add_seconds_local(1, move || {
@@ -2250,6 +2463,17 @@ fn install_css() {
         .bluetooth-action-selected {
             background: rgba(255, 255, 255, 0.16);
             outline: 2px solid #72c7d8;
+        }
+
+        .config-group {
+            border-radius: 4px;
+            padding: 8px;
+            background: rgba(255, 255, 255, 0.08);
+        }
+
+        .config-group-title {
+            color: rgba(255, 255, 255, 0.78);
+            font-weight: 700;
         }
         ",
     );
