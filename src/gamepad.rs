@@ -47,6 +47,8 @@ pub enum GamepadCommand {
     SetShiftHeld(bool),
     /// Toggle Caps Lock from the OSK/gamepad layer.
     ToggleCapsLock,
+    /// Show that Desktop Mode was enabled or disabled.
+    DesktopModeChanged(bool),
 }
 
 /// Direction to move the selected OSK key.
@@ -449,7 +451,11 @@ fn update_button_state(
     if *select_pressed && *start_pressed && !*desktop_combo_armed {
         *desktop_combo_armed = true;
         *select_consumed = true;
-        desktop_mode.set_active(!desktop_mode.is_active());
+        let enabled = !desktop_mode.is_active();
+        desktop_mode.set_active(enabled);
+        osk_sender
+            .send(GamepadCommand::DesktopModeChanged(enabled))
+            .context("failed to send desktop mode notification command")?;
     }
 
     if !*select_pressed || !*start_pressed {
