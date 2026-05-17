@@ -4,13 +4,34 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use evdev::Key;
+use uinput::event::controller::{Controller, Mouse};
 use uinput::event::keyboard::{self, Keyboard};
+use uinput::event::relative::{Position, Wheel};
 
 /// Thread-shareable virtual keyboard handle.
 pub type SharedVirtualKeyboard = Arc<Mutex<VirtualKeyboard>>;
 
+/// Thread-shareable virtual mouse handle.
+pub type SharedVirtualMouse = Arc<Mutex<VirtualMouse>>;
+
+/// Mouse buttons emitted by the GameEase virtual mouse.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum MouseButton {
+    /// Primary mouse button.
+    Left,
+    /// Secondary mouse button.
+    Right,
+    /// Middle mouse button.
+    Middle,
+}
+
 /// Virtual keyboard backed by Linux uinput.
 pub struct VirtualKeyboard {
+    device: uinput::Device,
+}
+
+/// Virtual mouse backed by Linux uinput.
+pub struct VirtualMouse {
     device: uinput::Device,
 }
 
@@ -77,6 +98,117 @@ impl VirtualKeyboard {
         self.press(key)?;
         thread::sleep(Duration::from_millis(20));
         self.release(key)
+    }
+}
+
+impl VirtualMouse {
+    /// Opens `/dev/uinput` and registers relative pointer, wheel, and mouse buttons.
+    pub fn new() -> Result<Self> {
+        let device = uinput::open("/dev/uinput")
+            .context("failed to open /dev/uinput")?
+            .name("GameEase Virtual Mouse")
+            .context("failed to name virtual mouse")?
+            .bus(0x03)
+            .vendor(0x1209)
+            .product(0x0002)
+            .version(1)
+            .event(Position::X)
+            .context("failed to register mouse X axis")?
+            .event(Position::Y)
+            .context("failed to register mouse Y axis")?
+            .event(Wheel::Vertical)
+            .context("failed to register mouse wheel")?
+            .event(Controller::Mouse(Mouse::Left))
+            .context("failed to register left mouse button")?
+            .event(Controller::Mouse(Mouse::Right))
+            .context("failed to register right mouse button")?
+            .event(Controller::Mouse(Mouse::Middle))
+            .context("failed to register middle mouse button")?
+            .create()
+            .context("failed to create virtual mouse")?;
+
+        thread::sleep(Duration::from_millis(100));
+
+        Ok(Self { device })
+    }
+
+    /// Opens `/dev/uinput` and returns the virtual mouse behind `Arc<Mutex<_>>`.
+    pub fn new_shared() -> Result<SharedVirtualMouse> {
+        Ok(Arc::new(Mutex::new(Self::new()?)))
+    }
+
+    /// Moves the pointer by a relative delta.
+    pub fn move_relative(&mut self, dx: i32, dy: i32) -> Result<()> {
+        if dx != 0 {
+            self.device
+                .position(&Position::X, dx)
+                .context("failed to move mouse on X axis")?;
+        }
+
+        if dy != 0 {
+            self.device
+                .position(&Position::Y, dy)
+                .context("failed to move mouse on Y axis")?;
+        }
+
+        self.device
+            .synchronize()
+            .context("failed to synchronize mouse movement")?;
+
+        Ok(())
+    }
+
+    /// Sends a mouse wheel delta.
+    pub fn scroll(&mut self, dy: i32) -> Result<()> {
+        self.device
+            .position(&Wheel::Vertical, dy)
+            .context("failed to scroll mouse wheel")?;
+        self.device
+            .synchronize()
+            .context("failed to synchronize mouse wheel")?;
+
+        Ok(())
+    }
+
+    /// Holds a mouse button down.
+    pub fn button_down(&mut self, button: MouseButton) -> Result<()> {
+        let button = to_uinput_mouse_button(button);
+        self.device
+            .press(&button)
+            .with_context(|| format!("failed to press mouse button {button:?}"))?;
+        self.device
+            .synchronize()
+            .context("failed to synchronize mouse button press")?;
+
+        Ok(())
+    }
+
+    /// Releases a mouse button.
+    pub fn button_up(&mut self, button: MouseButton) -> Result<()> {
+        let button = to_uinput_mouse_button(button);
+        self.device
+            .release(&button)
+            .with_context(|| format!("failed to release mouse button {button:?}"))?;
+        self.device
+            .synchronize()
+            .context("failed to synchronize mouse button release")?;
+
+        Ok(())
+    }
+
+    /// Sends a short mouse button click.
+    pub fn click(&mut self, button: MouseButton) -> Result<()> {
+        self.button_down(button)?;
+        thread::sleep(Duration::from_millis(20));
+        self.button_up(button)
+    }
+}
+
+fn to_uinput_mouse_button(button: MouseButton) -> Controller {
+    match button {
+        MouseButton::Left => Controller::Mouse(Mouse::Left),
+        MouseButton::Right => Controller::Mouse(Mouse::Right),
+        MouseButton::Middle => Controller::Mouse(Mouse::Middle),
     }
 }
 

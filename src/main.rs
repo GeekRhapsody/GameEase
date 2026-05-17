@@ -14,7 +14,7 @@ use gtk::prelude::*;
 use gtk4 as gtk;
 
 use crate::gamepad::{GamepadCommand, GamepadGrabCommand, SideMenuCommand};
-use crate::uinput::VirtualKeyboard;
+use crate::uinput::{VirtualKeyboard, VirtualMouse};
 
 fn main() -> gtk::glib::ExitCode {
     let application = gtk::Application::builder()
@@ -37,10 +37,22 @@ fn main() -> gtk::glib::ExitCode {
                 return;
             }
         };
+        let virtual_mouse = match VirtualMouse::new_shared() {
+            Ok(virtual_mouse) => virtual_mouse,
+            Err(error) => {
+                eprintln!("Failed to initialise virtual mouse: {error:#}");
+                app.quit();
+                return;
+            }
+        };
 
-        if let Err(error) =
-            gamepad::spawn_gamepad_thread(toggle_sender, sidemenu_sender, grab_receiver)
-        {
+        if let Err(error) = gamepad::spawn_gamepad_thread(
+            toggle_sender,
+            sidemenu_sender,
+            grab_receiver,
+            virtual_keyboard.clone(),
+            virtual_mouse,
+        ) {
             eprintln!("Failed to start gamepad thread: {error:#}");
         }
 

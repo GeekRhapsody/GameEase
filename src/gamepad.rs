@@ -3,15 +3,22 @@ use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use evdev::{AbsoluteAxisType, Device, InputEvent, InputEventKind, Key};
 use gilrs::{Axis, Button, Event, EventType as GilrsEventType, Gamepad, Gilrs, LinuxGamepadExt};
 
+use crate::uinput::{MouseButton, SharedVirtualKeyboard, SharedVirtualMouse};
+
 const F_GETFL: i32 = 3;
 const F_SETFL: i32 = 4;
 const O_NONBLOCK: i32 = 0o0004000;
+const POINTER_DEADZONE: f32 = 0.12;
+const POINTER_MAX_SPEED: f32 = 18.0;
+const SCROLL_MAX_SPEED: f32 = 3.0;
+const DPAD_REPEAT_INITIAL_DELAY: Duration = Duration::from_millis(400);
+const DPAD_REPEAT_INTERVAL: Duration = Duration::from_millis(120);
 
 extern "C" {
     fn fcntl(fd: i32, cmd: i32, ...) -> i32;
@@ -100,6 +107,8 @@ pub fn spawn_gamepad_thread(
     osk_sender: Sender<GamepadCommand>,
     sidemenu_sender: Sender<SideMenuCommand>,
     grab_receiver: Receiver<GamepadGrabCommand>,
+    virtual_keyboard: SharedVirtualKeyboard,
+    virtual_mouse: SharedVirtualMouse,
 ) -> Result<thread::JoinHandle<()>> {
     thread::Builder::new()
         .name("gameease-gamepad".to_string())
@@ -115,9 +124,13 @@ pub fn spawn_gamepad_thread(
                 }
             };
 
-            if let Err(error) =
-                runtime.block_on(run_event_loop(osk_sender, sidemenu_sender, grab_receiver))
-            {
+            if let Err(error) = runtime.block_on(run_event_loop(
+                osk_sender,
+                sidemenu_sender,
+                grab_receiver,
+                virtual_keyboard,
+                virtual_mouse,
+            )) {
                 eprintln!("Gamepad event loop stopped: {error:#}");
             }
         })
@@ -128,11 +141,14 @@ async fn run_event_loop(
     osk_sender: Sender<GamepadCommand>,
     sidemenu_sender: Sender<SideMenuCommand>,
     grab_receiver: Receiver<GamepadGrabCommand>,
+    virtual_keyboard: SharedVirtualKeyboard,
+    virtual_mouse: SharedVirtualMouse,
 ) -> Result<()> {
     let mut gilrs =
         Gilrs::new().map_err(|error| anyhow!("failed to initialise gilrs: {error:?}"))?;
     let mut grab_manager = GamepadGrabManager::default();
     let mut exclusive_requested = false;
+    let mut exclusive_desired = false;
     let mut exclusive_active = false;
     let mut south_pressed = false;
     let mut south_consumed = false;
@@ -144,55 +160,44 @@ async fn run_event_loop(
     let mut l2_pressed = false;
     let mut osk_combo_armed = false;
     let mut sidemenu_combo_armed = false;
+    let mut desktop_combo_armed = false;
     let mut sidemenu_open = false;
     let mut focused_row_index = 0usize;
     let mut focused_row = FocusedRow::None;
+    let mut desktop_mode = DesktopModeState::new(virtual_keyboard, virtual_mouse);
 
     loop {
         while let Ok(command) = grab_receiver.try_recv() {
             match command {
                 GamepadGrabCommand::SetExclusive(enabled) if enabled != exclusive_requested => {
                     exclusive_requested = enabled;
-
-                    if exclusive_requested {
-                        grab_manager.enable(&gilrs);
-                        exclusive_active = grab_manager.is_active();
-                        reset_button_state(
-                            &mut south_pressed,
-                            &mut south_consumed,
-                            &mut north_pressed,
-                            &mut north_consumed,
-                            &mut select_pressed,
-                            &mut select_consumed,
-                            &mut start_pressed,
-                            &mut l2_pressed,
-                            &mut osk_combo_armed,
-                            &mut sidemenu_combo_armed,
-                            &osk_sender,
-                        );
-                    } else {
-                        if exclusive_active {
-                            grab_manager.disable();
-                        }
-
-                        exclusive_active = false;
-                        reset_button_state(
-                            &mut south_pressed,
-                            &mut south_consumed,
-                            &mut north_pressed,
-                            &mut north_consumed,
-                            &mut select_pressed,
-                            &mut select_consumed,
-                            &mut start_pressed,
-                            &mut l2_pressed,
-                            &mut osk_combo_armed,
-                            &mut sidemenu_combo_armed,
-                            &osk_sender,
-                        );
-                    }
                 }
                 GamepadGrabCommand::SetExclusive(_) => {}
             }
+        }
+
+        if sync_gamepad_grab(
+            &mut grab_manager,
+            &gilrs,
+            exclusive_requested || desktop_mode.is_active(),
+            &mut exclusive_desired,
+            &mut exclusive_active,
+        ) {
+            reset_button_state(
+                &mut south_pressed,
+                &mut south_consumed,
+                &mut north_pressed,
+                &mut north_consumed,
+                &mut select_pressed,
+                &mut select_consumed,
+                &mut start_pressed,
+                &mut l2_pressed,
+                &mut osk_combo_armed,
+                &mut sidemenu_combo_armed,
+                &mut desktop_combo_armed,
+                &osk_sender,
+            );
+            desktop_mode.reset_inputs();
         }
 
         let events = if exclusive_active {
@@ -201,9 +206,7 @@ async fn run_event_loop(
             let mut events = Vec::new();
 
             while let Some(Event { event, .. }) = gilrs.next_event() {
-                if let Some(event) = raw_event_from_gilrs(event) {
-                    events.push(event);
-                }
+                push_raw_events_from_gilrs(event, &mut events);
             }
 
             events
@@ -222,12 +225,44 @@ async fn run_event_loop(
                 &mut l2_pressed,
                 &mut osk_combo_armed,
                 &mut sidemenu_combo_armed,
+                &mut desktop_combo_armed,
                 &mut sidemenu_open,
                 &mut focused_row_index,
                 &mut focused_row,
+                &mut desktop_mode,
                 &osk_sender,
                 &sidemenu_sender,
             )?;
+        }
+
+        if desktop_mode.is_active() && !exclusive_active {
+            sample_desktop_axes_from_gilrs(&gilrs, &mut desktop_mode);
+        }
+
+        desktop_mode.tick();
+
+        if sync_gamepad_grab(
+            &mut grab_manager,
+            &gilrs,
+            exclusive_requested || desktop_mode.is_active(),
+            &mut exclusive_desired,
+            &mut exclusive_active,
+        ) {
+            reset_button_state(
+                &mut south_pressed,
+                &mut south_consumed,
+                &mut north_pressed,
+                &mut north_consumed,
+                &mut select_pressed,
+                &mut select_consumed,
+                &mut start_pressed,
+                &mut l2_pressed,
+                &mut osk_combo_armed,
+                &mut sidemenu_combo_armed,
+                &mut desktop_combo_armed,
+                &osk_sender,
+            );
+            desktop_mode.reset_inputs();
         }
 
         tokio::time::sleep(Duration::from_millis(16)).await;
@@ -245,6 +280,7 @@ fn reset_button_state(
     l2_pressed: &mut bool,
     osk_combo_armed: &mut bool,
     sidemenu_combo_armed: &mut bool,
+    desktop_combo_armed: &mut bool,
     osk_sender: &Sender<GamepadCommand>,
 ) {
     if *l2_pressed {
@@ -261,12 +297,14 @@ fn reset_button_state(
     *l2_pressed = false;
     *osk_combo_armed = false;
     *sidemenu_combo_armed = false;
+    *desktop_combo_armed = false;
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum RawGamepadEvent {
     Press(Button),
     Release(Button),
+    Axis(Axis, f32),
     MoveSelection(KeyboardDirection),
 }
 
@@ -282,13 +320,35 @@ fn update_button_state(
     l2_pressed: &mut bool,
     osk_combo_armed: &mut bool,
     sidemenu_combo_armed: &mut bool,
+    desktop_combo_armed: &mut bool,
     sidemenu_open: &mut bool,
     focused_row_index: &mut usize,
     focused_row: &mut FocusedRow,
+    desktop_mode: &mut DesktopModeState,
     osk_sender: &Sender<GamepadCommand>,
     sidemenu_sender: &Sender<SideMenuCommand>,
 ) -> Result<()> {
     match event {
+        RawGamepadEvent::Press(Button::Select) => *select_pressed = true,
+        RawGamepadEvent::Release(Button::Select) => {
+            if !desktop_mode.is_active()
+                && *select_pressed
+                && !*select_consumed
+                && !*south_pressed
+                && !*north_pressed
+                && !*start_pressed
+            {
+                osk_sender
+                    .send(GamepadCommand::ToggleKeyboardPosition)
+                    .context("failed to send OSK position command")?;
+            }
+
+            *select_pressed = false;
+            *select_consumed = false;
+        }
+        RawGamepadEvent::Press(Button::Start) => *start_pressed = true,
+        RawGamepadEvent::Release(Button::Start) => *start_pressed = false,
+        _ if desktop_mode.is_active() => desktop_mode.handle_event(event),
         RawGamepadEvent::Press(Button::South) => *south_pressed = true,
         RawGamepadEvent::Release(Button::South) => {
             if *south_pressed && !*south_consumed && !*select_pressed {
@@ -319,19 +379,6 @@ fn update_button_state(
                 .send(GamepadCommand::ActivateEnter)
                 .context("failed to send OSK enter command")?;
         }
-        RawGamepadEvent::Press(Button::Select) => *select_pressed = true,
-        RawGamepadEvent::Release(Button::Select) => {
-            if *select_pressed && !*select_consumed && !*south_pressed && !*north_pressed {
-                osk_sender
-                    .send(GamepadCommand::ToggleKeyboardPosition)
-                    .context("failed to send OSK position command")?;
-            }
-
-            *select_pressed = false;
-            *select_consumed = false;
-        }
-        RawGamepadEvent::Press(Button::Start) => *start_pressed = true,
-        RawGamepadEvent::Release(Button::Start) => *start_pressed = false,
         RawGamepadEvent::Press(Button::LeftThumb) => {
             osk_sender
                 .send(GamepadCommand::ToggleCapsLock)
@@ -395,7 +442,18 @@ fn update_button_state(
         RawGamepadEvent::MoveSelection(direction) => {
             send_selection_move(osk_sender, sidemenu_sender, direction)?
         }
+        RawGamepadEvent::Axis(_, _) => {}
         _ => {}
+    }
+
+    if *select_pressed && *start_pressed && !*desktop_combo_armed {
+        *desktop_combo_armed = true;
+        *select_consumed = true;
+        desktop_mode.set_active(!desktop_mode.is_active());
+    }
+
+    if !*select_pressed || !*start_pressed {
+        *desktop_combo_armed = false;
     }
 
     if *south_pressed && *select_pressed && !*osk_combo_armed {
@@ -462,6 +520,346 @@ fn update_focused_row(
     Ok(())
 }
 
+struct DesktopModeState {
+    active: bool,
+    virtual_keyboard: SharedVirtualKeyboard,
+    virtual_mouse: SharedVirtualMouse,
+    right_stick_x: f32,
+    right_stick_y: f32,
+    left_stick_y: f32,
+    left_button_down: bool,
+    right_button_down: bool,
+    dpad_up: DpadRepeat,
+    dpad_down: DpadRepeat,
+    dpad_left: DpadRepeat,
+    dpad_right: DpadRepeat,
+}
+
+impl DesktopModeState {
+    fn new(virtual_keyboard: SharedVirtualKeyboard, virtual_mouse: SharedVirtualMouse) -> Self {
+        Self {
+            active: false,
+            virtual_keyboard,
+            virtual_mouse,
+            right_stick_x: 0.0,
+            right_stick_y: 0.0,
+            left_stick_y: 0.0,
+            left_button_down: false,
+            right_button_down: false,
+            dpad_up: DpadRepeat::default(),
+            dpad_down: DpadRepeat::default(),
+            dpad_left: DpadRepeat::default(),
+            dpad_right: DpadRepeat::default(),
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        self.active
+    }
+
+    fn set_active(&mut self, active: bool) {
+        if self.active == active {
+            return;
+        }
+
+        if !active {
+            self.release_pointer_buttons();
+        }
+
+        self.active = active;
+        self.reset_inputs();
+
+        eprintln!(
+            "Desktop Mode {}",
+            if self.active { "enabled" } else { "disabled" }
+        );
+    }
+
+    fn reset_inputs(&mut self) {
+        self.right_stick_x = 0.0;
+        self.right_stick_y = 0.0;
+        self.left_stick_y = 0.0;
+        self.dpad_up.reset();
+        self.dpad_down.reset();
+        self.dpad_left.reset();
+        self.dpad_right.reset();
+    }
+
+    fn handle_event(&mut self, event: RawGamepadEvent) {
+        match event {
+            RawGamepadEvent::Axis(Axis::RightStickX, value) => self.right_stick_x = value,
+            RawGamepadEvent::Axis(Axis::RightStickY, value) => self.right_stick_y = value,
+            RawGamepadEvent::Axis(Axis::LeftStickY, value) => self.left_stick_y = value,
+            RawGamepadEvent::Axis(Axis::RightZ, value) => {
+                self.set_mouse_button(MouseButton::Left, value > 0.5)
+            }
+            RawGamepadEvent::Axis(Axis::LeftZ, value) => {
+                self.set_mouse_button(MouseButton::Right, value > 0.5)
+            }
+            RawGamepadEvent::Press(Button::RightThumb) => self.click_mouse(MouseButton::Middle),
+            RawGamepadEvent::Press(Button::DPadUp) => self.press_dpad(Key::KEY_UP),
+            RawGamepadEvent::Release(Button::DPadUp) => self.dpad_up.reset(),
+            RawGamepadEvent::Press(Button::DPadDown) => self.press_dpad(Key::KEY_DOWN),
+            RawGamepadEvent::Release(Button::DPadDown) => self.dpad_down.reset(),
+            RawGamepadEvent::Press(Button::DPadLeft) => self.press_dpad(Key::KEY_LEFT),
+            RawGamepadEvent::Release(Button::DPadLeft) => self.dpad_left.reset(),
+            RawGamepadEvent::Press(Button::DPadRight) => self.press_dpad(Key::KEY_RIGHT),
+            RawGamepadEvent::Release(Button::DPadRight) => self.dpad_right.reset(),
+            RawGamepadEvent::Press(Button::LeftTrigger2) => {
+                self.set_mouse_button(MouseButton::Right, true)
+            }
+            RawGamepadEvent::Release(Button::LeftTrigger2) => {
+                self.set_mouse_button(MouseButton::Right, false)
+            }
+            RawGamepadEvent::Press(Button::RightTrigger2) => {
+                self.set_mouse_button(MouseButton::Left, true)
+            }
+            RawGamepadEvent::Release(Button::RightTrigger2) => {
+                self.set_mouse_button(MouseButton::Left, false)
+            }
+            _ => {}
+        }
+    }
+
+    fn tick(&mut self) {
+        if !self.active {
+            return;
+        }
+
+        self.move_pointer();
+        self.scroll();
+        self.repeat_dpad();
+    }
+
+    fn move_pointer(&mut self) {
+        let dx = accelerated_axis_delta(self.right_stick_x, 1.6, POINTER_MAX_SPEED);
+        let dy = accelerated_axis_delta(self.right_stick_y, 1.6, POINTER_MAX_SPEED);
+
+        if dx == 0 && dy == 0 {
+            return;
+        }
+
+        let result = self
+            .virtual_mouse
+            .lock()
+            .map_err(|error| anyhow!("virtual mouse lock poisoned: {error}"))
+            .and_then(|mut mouse| mouse.move_relative(dx, dy));
+
+        if let Err(error) = result {
+            eprintln!("Failed to move desktop pointer: {error:#}");
+        }
+    }
+
+    fn scroll(&mut self) {
+        let dy = accelerated_axis_delta(self.left_stick_y, 1.4, SCROLL_MAX_SPEED);
+
+        if dy == 0 {
+            return;
+        }
+
+        let result = self
+            .virtual_mouse
+            .lock()
+            .map_err(|error| anyhow!("virtual mouse lock poisoned: {error}"))
+            .and_then(|mut mouse| mouse.scroll(dy));
+
+        if let Err(error) = result {
+            eprintln!("Failed to scroll desktop pointer: {error:#}");
+        }
+    }
+
+    fn repeat_dpad(&mut self) {
+        let now = Instant::now();
+        Self::repeat_dpad_key(&self.virtual_keyboard, &mut self.dpad_up, Key::KEY_UP, now);
+        Self::repeat_dpad_key(
+            &self.virtual_keyboard,
+            &mut self.dpad_down,
+            Key::KEY_DOWN,
+            now,
+        );
+        Self::repeat_dpad_key(
+            &self.virtual_keyboard,
+            &mut self.dpad_left,
+            Key::KEY_LEFT,
+            now,
+        );
+        Self::repeat_dpad_key(
+            &self.virtual_keyboard,
+            &mut self.dpad_right,
+            Key::KEY_RIGHT,
+            now,
+        );
+    }
+
+    fn repeat_dpad_key(
+        virtual_keyboard: &SharedVirtualKeyboard,
+        repeat: &mut DpadRepeat,
+        key: Key,
+        now: Instant,
+    ) {
+        if !repeat.should_repeat(now) {
+            return;
+        }
+
+        tap_virtual_key(virtual_keyboard, key);
+    }
+
+    fn press_dpad(&mut self, key: Key) {
+        let repeat = match key {
+            Key::KEY_UP => &mut self.dpad_up,
+            Key::KEY_DOWN => &mut self.dpad_down,
+            Key::KEY_LEFT => &mut self.dpad_left,
+            Key::KEY_RIGHT => &mut self.dpad_right,
+            _ => return,
+        };
+
+        if repeat.press(Instant::now()) {
+            tap_virtual_key(&self.virtual_keyboard, key);
+        }
+    }
+
+    fn set_mouse_button(&mut self, button: MouseButton, pressed: bool) {
+        let state = match button {
+            MouseButton::Left => &mut self.left_button_down,
+            MouseButton::Right => &mut self.right_button_down,
+            MouseButton::Middle => return,
+        };
+
+        if *state == pressed {
+            return;
+        }
+
+        let result = self
+            .virtual_mouse
+            .lock()
+            .map_err(|error| anyhow!("virtual mouse lock poisoned: {error}"))
+            .and_then(|mut mouse| {
+                if pressed {
+                    mouse.button_down(button)
+                } else {
+                    mouse.button_up(button)
+                }
+            });
+
+        match result {
+            Ok(()) => *state = pressed,
+            Err(error) => eprintln!("Failed to update desktop mouse button: {error:#}"),
+        }
+    }
+
+    fn click_mouse(&mut self, button: MouseButton) {
+        let result = self
+            .virtual_mouse
+            .lock()
+            .map_err(|error| anyhow!("virtual mouse lock poisoned: {error}"))
+            .and_then(|mut mouse| mouse.click(button));
+
+        if let Err(error) = result {
+            eprintln!("Failed to click desktop mouse button: {error:#}");
+        }
+    }
+
+    fn release_pointer_buttons(&mut self) {
+        self.set_mouse_button(MouseButton::Left, false);
+        self.set_mouse_button(MouseButton::Right, false);
+    }
+}
+
+#[derive(Default)]
+struct DpadRepeat {
+    held: bool,
+    next_repeat: Option<Instant>,
+}
+
+impl DpadRepeat {
+    fn press(&mut self, now: Instant) -> bool {
+        if self.held {
+            return false;
+        }
+
+        self.held = true;
+        self.next_repeat = Some(now + DPAD_REPEAT_INITIAL_DELAY);
+        true
+    }
+
+    fn reset(&mut self) {
+        self.held = false;
+        self.next_repeat = None;
+    }
+
+    fn should_repeat(&mut self, now: Instant) -> bool {
+        let Some(next_repeat) = self.next_repeat else {
+            return false;
+        };
+
+        if !self.held || now < next_repeat {
+            return false;
+        }
+
+        self.next_repeat = Some(now + DPAD_REPEAT_INTERVAL);
+        true
+    }
+}
+
+fn accelerated_axis_delta(value: f32, exponent: f32, max_speed: f32) -> i32 {
+    if value.abs() < POINTER_DEADZONE {
+        return 0;
+    }
+
+    (value.abs().powf(exponent) * max_speed * value.signum()) as i32
+}
+
+fn tap_virtual_key(virtual_keyboard: &SharedVirtualKeyboard, key: Key) {
+    let result = virtual_keyboard
+        .lock()
+        .map_err(|error| anyhow!("virtual keyboard lock poisoned: {error}"))
+        .and_then(|mut keyboard| keyboard.tap(key));
+
+    if let Err(error) = result {
+        eprintln!("Failed to tap desktop arrow key: {error:#}");
+    }
+}
+
+fn sync_gamepad_grab(
+    grab_manager: &mut GamepadGrabManager,
+    gilrs: &Gilrs,
+    desired_active: bool,
+    exclusive_desired: &mut bool,
+    exclusive_active: &mut bool,
+) -> bool {
+    if desired_active == *exclusive_desired {
+        return false;
+    }
+
+    *exclusive_desired = desired_active;
+
+    if desired_active {
+        grab_manager.enable(gilrs);
+        *exclusive_active = grab_manager.is_active();
+    } else {
+        grab_manager.disable();
+        *exclusive_active = false;
+    }
+
+    true
+}
+
+fn sample_desktop_axes_from_gilrs(gilrs: &Gilrs, desktop_mode: &mut DesktopModeState) {
+    let Some((_, gamepad)) = gilrs.gamepads().next() else {
+        return;
+    };
+
+    for axis in [
+        Axis::RightStickX,
+        Axis::RightStickY,
+        Axis::LeftStickY,
+        Axis::LeftZ,
+        Axis::RightZ,
+    ] {
+        desktop_mode.handle_event(RawGamepadEvent::Axis(axis, gamepad.value(axis)));
+    }
+}
+
 #[derive(Default)]
 struct GamepadGrabManager {
     devices: Vec<GrabbedGamepad>,
@@ -472,6 +870,7 @@ struct GrabbedGamepad {
     device: Device,
     mapped_buttons: Vec<(u32, Button)>,
     mapped_axes: Vec<(u32, Axis)>,
+    axis_ranges: Vec<(AbsoluteAxisType, AxisRange)>,
     dpad_x: i32,
     dpad_y: i32,
     left_trigger_z: i32,
@@ -487,17 +886,21 @@ impl GamepadGrabManager {
             let path = gamepad.devpath().to_path_buf();
 
             match open_grabbed_device(&path) {
-                Ok(device) => self.devices.push(GrabbedGamepad {
-                    path,
-                    device,
-                    mapped_buttons: mapped_gamepad_buttons(&gamepad),
-                    mapped_axes: mapped_gamepad_axes(&gamepad),
-                    dpad_x: 0,
-                    dpad_y: 0,
-                    left_trigger_z: 0,
-                    right_trigger_z: 0,
-                    right_stick_x: 0,
-                }),
+                Ok(device) => {
+                    let axis_ranges = axis_ranges_for_device(&device);
+                    self.devices.push(GrabbedGamepad {
+                        path,
+                        device,
+                        mapped_buttons: mapped_gamepad_buttons(&gamepad),
+                        mapped_axes: mapped_gamepad_axes(&gamepad),
+                        axis_ranges,
+                        dpad_x: 0,
+                        dpad_y: 0,
+                        left_trigger_z: 0,
+                        right_trigger_z: 0,
+                        right_stick_x: 0,
+                    });
+                }
                 Err(error) => {
                     eprintln!("Failed to grab gamepad device {}: {error}", path.display());
                 }
@@ -547,6 +950,7 @@ impl GamepadGrabManager {
                     event,
                     &grabbed.mapped_buttons,
                     &grabbed.mapped_axes,
+                    &grabbed.axis_ranges,
                     &mut grabbed.dpad_x,
                     &mut grabbed.dpad_y,
                     &mut grabbed.left_trigger_z,
@@ -586,29 +990,47 @@ fn set_nonblocking(device: &Device) -> io::Result<()> {
     Ok(())
 }
 
-fn raw_event_from_gilrs(event: GilrsEventType) -> Option<RawGamepadEvent> {
+fn push_raw_events_from_gilrs(event: GilrsEventType, raw_events: &mut Vec<RawGamepadEvent>) {
     match event {
-        GilrsEventType::ButtonPressed(button, _) => Some(RawGamepadEvent::Press(button)),
-        GilrsEventType::ButtonReleased(button, _) => Some(RawGamepadEvent::Release(button)),
-        GilrsEventType::AxisChanged(Axis::RightStickX, value, _) if value >= 0.65 => {
-            Some(RawGamepadEvent::MoveSelection(KeyboardDirection::Right))
+        GilrsEventType::ButtonPressed(button, _) => raw_events.push(RawGamepadEvent::Press(button)),
+        GilrsEventType::ButtonReleased(button, _) => {
+            raw_events.push(RawGamepadEvent::Release(button))
         }
-        GilrsEventType::AxisChanged(Axis::RightStickX, value, _) if value <= -0.65 => {
-            Some(RawGamepadEvent::MoveSelection(KeyboardDirection::Left))
+        GilrsEventType::AxisChanged(axis, value, _)
+            if matches!(
+                axis,
+                Axis::RightStickX
+                    | Axis::RightStickY
+                    | Axis::LeftStickY
+                    | Axis::LeftZ
+                    | Axis::RightZ
+            ) =>
+        {
+            raw_events.push(RawGamepadEvent::Axis(axis, value));
+
+            match axis {
+                Axis::RightStickX if value >= 0.65 => {
+                    raw_events.push(RawGamepadEvent::MoveSelection(KeyboardDirection::Right));
+                }
+                Axis::RightStickX if value <= -0.65 => {
+                    raw_events.push(RawGamepadEvent::MoveSelection(KeyboardDirection::Left));
+                }
+                Axis::LeftZ if value >= 0.5 => {
+                    raw_events.push(RawGamepadEvent::Press(Button::LeftTrigger2));
+                }
+                Axis::LeftZ if value <= 0.2 => {
+                    raw_events.push(RawGamepadEvent::Release(Button::LeftTrigger2));
+                }
+                Axis::RightZ if value >= 0.5 => {
+                    raw_events.push(RawGamepadEvent::Press(Button::RightTrigger2));
+                }
+                Axis::RightZ if value <= 0.2 => {
+                    raw_events.push(RawGamepadEvent::Release(Button::RightTrigger2));
+                }
+                _ => {}
+            }
         }
-        GilrsEventType::AxisChanged(Axis::LeftZ, value, _) if value >= 0.5 => {
-            Some(RawGamepadEvent::Press(Button::LeftTrigger2))
-        }
-        GilrsEventType::AxisChanged(Axis::LeftZ, value, _) if value <= 0.2 => {
-            Some(RawGamepadEvent::Release(Button::LeftTrigger2))
-        }
-        GilrsEventType::AxisChanged(Axis::RightZ, value, _) if value >= 0.5 => {
-            Some(RawGamepadEvent::Press(Button::RightTrigger2))
-        }
-        GilrsEventType::AxisChanged(Axis::RightZ, value, _) if value <= 0.2 => {
-            Some(RawGamepadEvent::Release(Button::RightTrigger2))
-        }
-        _ => None,
+        _ => {}
     }
 }
 
@@ -616,6 +1038,7 @@ fn translate_evdev_event(
     event: InputEvent,
     mapped_buttons: &[(u32, Button)],
     mapped_axes: &[(u32, Axis)],
+    axis_ranges: &[(AbsoluteAxisType, AxisRange)],
     dpad_x: &mut i32,
     dpad_y: &mut i32,
     left_trigger_z: &mut i32,
@@ -629,13 +1052,23 @@ fn translate_evdev_event(
             if mapped_axis_from_event(event, mapped_axes) == Some(Axis::LeftZ)
                 || axis == AbsoluteAxisType::ABS_Z =>
         {
-            translate_left_trigger(event.value(), left_trigger_z, raw_events)
+            translate_left_trigger(
+                event.value(),
+                axis_range(axis_ranges, axis),
+                left_trigger_z,
+                raw_events,
+            )
         }
         InputEventKind::AbsAxis(axis)
             if mapped_axis_from_event(event, mapped_axes) == Some(Axis::RightZ)
                 || axis == AbsoluteAxisType::ABS_RZ =>
         {
-            translate_right_trigger(event.value(), right_trigger_z, raw_events)
+            translate_right_trigger(
+                event.value(),
+                axis_range(axis_ranges, axis),
+                right_trigger_z,
+                raw_events,
+            )
         }
         InputEventKind::AbsAxis(AbsoluteAxisType::ABS_HAT0X) => translate_hat_axis(
             event.value(),
@@ -652,10 +1085,27 @@ fn translate_evdev_event(
             raw_events,
         ),
         InputEventKind::AbsAxis(axis)
+            if mapped_axis_from_event(event, mapped_axes) == Some(Axis::LeftStickY)
+                || axis == AbsoluteAxisType::ABS_Y =>
+        {
+            translate_left_stick_y(event.value(), axis_range(axis_ranges, axis), raw_events)
+        }
+        InputEventKind::AbsAxis(axis)
             if mapped_axis_from_event(event, mapped_axes) == Some(Axis::RightStickX)
                 || axis == AbsoluteAxisType::ABS_RX =>
         {
-            translate_right_stick_x(event.value(), right_stick_x, raw_events)
+            translate_right_stick_x(
+                event.value(),
+                axis_range(axis_ranges, axis),
+                right_stick_x,
+                raw_events,
+            )
+        }
+        InputEventKind::AbsAxis(axis)
+            if mapped_axis_from_event(event, mapped_axes) == Some(Axis::RightStickY)
+                || axis == AbsoluteAxisType::ABS_RY =>
+        {
+            translate_right_stick_y(event.value(), axis_range(axis_ranges, axis), raw_events)
         }
         _ => {}
     }
@@ -687,6 +1137,7 @@ fn button_from_evdev_key(key: Key) -> Option<Button> {
         Key::BTN_NORTH => Some(Button::North),
         Key::BTN_WEST => Some(Button::West),
         Key::BTN_THUMBL => Some(Button::LeftThumb),
+        Key::BTN_THUMBR => Some(Button::RightThumb),
         Key::BTN_TL2 => Some(Button::LeftTrigger2),
         Key::BTN_TR2 => Some(Button::RightTrigger2),
         Key::BTN_BACK => Some(Button::Select),
@@ -716,6 +1167,72 @@ fn mapped_axis_from_event(event: InputEvent, mapped_axes: &[(u32, Axis)]) -> Opt
         .find_map(|(code, axis)| (*code == event_code).then_some(*axis))
 }
 
+#[derive(Debug, Clone, Copy)]
+struct AxisRange {
+    minimum: i32,
+    maximum: i32,
+    flat: i32,
+}
+
+impl AxisRange {
+    fn normalize_stick(self, value: i32) -> f32 {
+        let half_range = ((self.maximum - self.minimum) as f32 / 2.0).max(1.0);
+        let center = self.minimum as f32 + half_range;
+
+        if (value as f32 - center).abs() <= self.flat.max(0) as f32 {
+            return 0.0;
+        }
+
+        ((value as f32 - center) / half_range).clamp(-1.0, 1.0)
+    }
+
+    fn normalize_trigger(self, value: i32) -> f32 {
+        let range = (self.maximum - self.minimum) as f32;
+        if range <= 0.0 {
+            return 0.0;
+        }
+
+        ((value - self.minimum) as f32 / range).clamp(0.0, 1.0)
+    }
+}
+
+fn axis_ranges_for_device(device: &Device) -> Vec<(AbsoluteAxisType, AxisRange)> {
+    let Ok(abs_state) = device.get_abs_state() else {
+        return Vec::new();
+    };
+
+    [
+        AbsoluteAxisType::ABS_X,
+        AbsoluteAxisType::ABS_Y,
+        AbsoluteAxisType::ABS_RX,
+        AbsoluteAxisType::ABS_RY,
+        AbsoluteAxisType::ABS_Z,
+        AbsoluteAxisType::ABS_RZ,
+    ]
+    .into_iter()
+    .filter_map(|axis| {
+        let info = abs_state[axis.0 as usize];
+        (info.maximum != info.minimum).then_some((
+            axis,
+            AxisRange {
+                minimum: info.minimum,
+                maximum: info.maximum,
+                flat: info.flat,
+            },
+        ))
+    })
+    .collect()
+}
+
+fn axis_range(
+    axis_ranges: &[(AbsoluteAxisType, AxisRange)],
+    axis: AbsoluteAxisType,
+) -> Option<AxisRange> {
+    axis_ranges
+        .iter()
+        .find_map(|(candidate, range)| (*candidate == axis).then_some(*range))
+}
+
 fn mapped_gamepad_buttons(gamepad: &Gamepad<'_>) -> Vec<(u32, Button)> {
     [
         Button::South,
@@ -723,6 +1240,7 @@ fn mapped_gamepad_buttons(gamepad: &Gamepad<'_>) -> Vec<(u32, Button)> {
         Button::North,
         Button::West,
         Button::LeftThumb,
+        Button::RightThumb,
         Button::LeftTrigger2,
         Button::RightTrigger2,
         Button::Select,
@@ -742,10 +1260,16 @@ fn mapped_gamepad_buttons(gamepad: &Gamepad<'_>) -> Vec<(u32, Button)> {
 }
 
 fn mapped_gamepad_axes(gamepad: &Gamepad<'_>) -> Vec<(u32, Axis)> {
-    [Axis::LeftZ, Axis::RightZ, Axis::RightStickX]
-        .into_iter()
-        .filter_map(|axis| gamepad.axis_code(axis).map(|code| (code.into_u32(), axis)))
-        .collect()
+    [
+        Axis::LeftStickY,
+        Axis::RightStickX,
+        Axis::RightStickY,
+        Axis::LeftZ,
+        Axis::RightZ,
+    ]
+    .into_iter()
+    .filter_map(|axis| gamepad.axis_code(axis).map(|code| (code.into_u32(), axis)))
+    .collect()
 }
 
 fn packed_evdev_code(event: InputEvent) -> u32 {
@@ -754,9 +1278,15 @@ fn packed_evdev_code(event: InputEvent) -> u32 {
 
 fn translate_right_stick_x(
     value: i32,
+    range: Option<AxisRange>,
     previous_zone: &mut i32,
     raw_events: &mut Vec<RawGamepadEvent>,
 ) {
+    raw_events.push(RawGamepadEvent::Axis(
+        Axis::RightStickX,
+        normalize_stick_axis(value, range),
+    ));
+
     let next_zone = axis_zone(value);
 
     if next_zone == *previous_zone {
@@ -776,11 +1306,39 @@ fn translate_right_stick_x(
     *previous_zone = next_zone;
 }
 
+fn translate_right_stick_y(
+    value: i32,
+    range: Option<AxisRange>,
+    raw_events: &mut Vec<RawGamepadEvent>,
+) {
+    raw_events.push(RawGamepadEvent::Axis(
+        Axis::RightStickY,
+        normalize_stick_axis(value, range),
+    ));
+}
+
+fn translate_left_stick_y(
+    value: i32,
+    range: Option<AxisRange>,
+    raw_events: &mut Vec<RawGamepadEvent>,
+) {
+    raw_events.push(RawGamepadEvent::Axis(
+        Axis::LeftStickY,
+        -normalize_stick_axis(value, range),
+    ));
+}
+
 fn translate_left_trigger(
     value: i32,
+    range: Option<AxisRange>,
     previous_zone: &mut i32,
     raw_events: &mut Vec<RawGamepadEvent>,
 ) {
+    raw_events.push(RawGamepadEvent::Axis(
+        Axis::LeftZ,
+        normalize_trigger_axis(value, range),
+    ));
+
     let next_zone = trigger_zone(value);
 
     if next_zone == *previous_zone {
@@ -798,9 +1356,15 @@ fn translate_left_trigger(
 
 fn translate_right_trigger(
     value: i32,
+    range: Option<AxisRange>,
     previous_zone: &mut i32,
     raw_events: &mut Vec<RawGamepadEvent>,
 ) {
+    raw_events.push(RawGamepadEvent::Axis(
+        Axis::RightZ,
+        normalize_trigger_axis(value, range),
+    ));
+
     let next_zone = trigger_zone(value);
 
     if next_zone == *previous_zone {
@@ -814,6 +1378,34 @@ fn translate_right_trigger(
     }
 
     *previous_zone = next_zone;
+}
+
+fn normalize_stick_axis(value: i32, range: Option<AxisRange>) -> f32 {
+    if let Some(range) = range {
+        return range.normalize_stick(value);
+    }
+
+    if value == 0 {
+        return 0.0;
+    }
+
+    if (0..=255).contains(&value) {
+        ((value as f32 - 128.0) / 127.0).clamp(-1.0, 1.0)
+    } else {
+        (value as f32 / 32_767.0).clamp(-1.0, 1.0)
+    }
+}
+
+fn normalize_trigger_axis(value: i32, range: Option<AxisRange>) -> f32 {
+    if let Some(range) = range {
+        return range.normalize_trigger(value);
+    }
+
+    if value <= 255 {
+        (value as f32 / 255.0).clamp(0.0, 1.0)
+    } else {
+        (value as f32 / 32_767.0).clamp(0.0, 1.0)
+    }
 }
 
 fn trigger_zone(value: i32) -> i32 {
