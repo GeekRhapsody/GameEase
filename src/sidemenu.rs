@@ -17,7 +17,6 @@ const SIDE_MENU_WIDTH: i32 = 280;
 const WIFI_PANEL_WIDTH: i32 = 360;
 const TASK_PANEL_WIDTH: i32 = 380;
 const BLUETOOTH_PANEL_WIDTH: i32 = 380;
-const CONTROLLER_PANEL_WIDTH: i32 = 320;
 const VOLUME_STEP: f64 = 5.0;
 const MAX_VOLUME: f64 = 100.0;
 
@@ -48,7 +47,6 @@ struct SideMenuState {
     wifi_panel: gtk::Box,
     task_panel: gtk::Box,
     bluetooth_panel: gtk::Box,
-    controller_panel: gtk::Box,
     rows: Vec<gtk::ListBoxRow>,
     row_kinds: Vec<SideMenuRowKind>,
     selected_index: Cell<usize>,
@@ -81,17 +79,15 @@ struct SideMenuState {
     bluetooth_spinner: gtk::Spinner,
     bluetooth_device_list: gtk::ListBox,
     bluetooth_error_label: gtk::Label,
-    bluetooth_reorder_button: gtk::Button,
     bluetooth_action_popover: gtk::Popover,
+    bluetooth_disconnect_button: gtk::Button,
+    bluetooth_remove_button: gtk::Button,
     bluetooth_devices: RefCell<Vec<BluetoothDevice>>,
     bluetooth_device_rows: RefCell<Vec<gtk::ListBoxRow>>,
     bluetooth_selected_index: Cell<usize>,
+    bluetooth_action_selected_index: Cell<usize>,
     bluetooth_busy: Cell<bool>,
     bluetooth_popover_device: RefCell<Option<BluetoothDevice>>,
-    controller_list: gtk::ListBox,
-    controller_rows: RefCell<Vec<gtk::ListBoxRow>>,
-    controller_order: RefCell<Vec<BluetoothDevice>>,
-    controller_selected_index: Cell<usize>,
 }
 
 enum AudioUiMessage {
@@ -117,11 +113,6 @@ impl SideMenu {
         match direction {
             KeyboardDirection::Up | KeyboardDirection::Down
                 if self.state.is_task_panel_open() && self.state.move_task_selection(direction) =>
-            {
-                return;
-            }
-            _ if self.state.is_controller_panel_open()
-                && self.state.move_controller_selection(direction) =>
             {
                 return;
             }
@@ -159,9 +150,6 @@ impl SideMenu {
         if self.state.is_task_panel_open() {
             return self.state.activate_task_selection();
         }
-        if self.state.is_controller_panel_open() {
-            return SideMenuAction::None;
-        }
         if self.state.is_bluetooth_panel_open() {
             return self.state.activate_bluetooth_selection();
         }
@@ -182,13 +170,6 @@ impl SideMenu {
             }
             SideMenuRowKind::Quit => SideMenuAction::Quit,
             SideMenuRowKind::Brightness => SideMenuAction::None,
-        }
-    }
-
-    /// Long-activates the selected row when the current panel supports it.
-    pub fn long_activate_selected(&self) {
-        if self.state.is_bluetooth_panel_open() {
-            self.state.long_activate_bluetooth_selection();
         }
     }
 
@@ -365,11 +346,7 @@ impl SideMenuState {
 
     fn cancel_active_panel(&self) -> bool {
         if self.bluetooth_action_popover.is_visible() {
-            self.bluetooth_action_popover.popdown();
-            return true;
-        }
-        if self.is_controller_panel_open() {
-            self.close_controller_panel();
+            self.close_bluetooth_action_popover();
             return true;
         }
         if self.is_bluetooth_panel_open() {
@@ -860,39 +837,11 @@ impl SideMenuState {
             return;
         }
 
-        self.close_controller_panel();
-        self.bluetooth_action_popover.popdown();
+        self.close_bluetooth_action_popover();
         self.bluetooth_panel.set_visible(false);
         self.root_panel.set_width_request(SIDE_MENU_WIDTH);
         self.revealer.set_width_request(SIDE_MENU_WIDTH);
-        self.bluetooth_reorder_button
-            .remove_css_class("bluetooth-device-selected");
         self.rows[self.selected_index.get()].grab_focus();
-    }
-
-    fn open_controller_panel(&self) {
-        if self.is_controller_panel_open() {
-            return;
-        }
-
-        self.rebuild_controller_rows();
-        self.controller_panel.set_visible(true);
-        self.root_panel
-            .set_width_request(SIDE_MENU_WIDTH + BLUETOOTH_PANEL_WIDTH + CONTROLLER_PANEL_WIDTH);
-        self.revealer
-            .set_width_request(SIDE_MENU_WIDTH + BLUETOOTH_PANEL_WIDTH + CONTROLLER_PANEL_WIDTH);
-    }
-
-    fn close_controller_panel(&self) {
-        if !self.is_controller_panel_open() {
-            return;
-        }
-
-        self.controller_panel.set_visible(false);
-        self.root_panel
-            .set_width_request(SIDE_MENU_WIDTH + BLUETOOTH_PANEL_WIDTH);
-        self.revealer
-            .set_width_request(SIDE_MENU_WIDTH + BLUETOOTH_PANEL_WIDTH);
     }
 
     fn refresh_bluetooth(&self) {
@@ -919,7 +868,17 @@ impl SideMenuState {
             return false;
         }
 
+        if self.bluetooth_action_popover.is_visible() {
+            self.move_bluetooth_action_selection(direction);
+            return true;
+        }
+
         let item_count = self.bluetooth_selectable_count();
+        if item_count == 0 {
+            self.bluetooth_selected_index.set(0);
+            return true;
+        }
+
         let current = self
             .bluetooth_selected_index
             .get()
@@ -936,12 +895,17 @@ impl SideMenuState {
     }
 
     fn activate_bluetooth_selection(&self) -> SideMenuAction {
-        let device_count = self.bluetooth_device_rows.borrow().len();
-        let index = self.bluetooth_selected_index.get().min(device_count);
-        if index == device_count {
-            self.open_controller_panel();
+        if self.bluetooth_action_popover.is_visible() {
+            self.activate_bluetooth_action_selection();
             return SideMenuAction::None;
         }
+
+        let device_count = self.bluetooth_device_rows.borrow().len();
+        if device_count == 0 {
+            return SideMenuAction::None;
+        }
+
+        let index = self.bluetooth_selected_index.get().min(device_count - 1);
 
         let devices = self.bluetooth_devices.borrow();
         let Some(device) = devices.get(index).cloned() else {
@@ -950,6 +914,7 @@ impl SideMenuState {
         drop(devices);
 
         if device.connected {
+            self.show_bluetooth_action_popover(device, index);
             return SideMenuAction::None;
         }
 
@@ -969,32 +934,101 @@ impl SideMenuState {
         SideMenuAction::None
     }
 
-    fn long_activate_bluetooth_selection(&self) {
-        let device_count = self.bluetooth_device_rows.borrow().len();
-        let index = self.bluetooth_selected_index.get().min(device_count);
-        if index >= device_count {
-            return;
-        }
-
-        let devices = self.bluetooth_devices.borrow();
-        let Some(device) = devices
-            .get(index)
-            .cloned()
-            .filter(|device| device.connected)
-        else {
-            return;
-        };
-        drop(devices);
-
+    fn show_bluetooth_action_popover(&self, device: BluetoothDevice, index: usize) {
         let rows = self.bluetooth_device_rows.borrow();
         if let Some(row) = rows.get(index) {
-            self.bluetooth_popover_device.replace(Some(device));
-            if self.bluetooth_action_popover.parent().is_some() {
-                self.bluetooth_action_popover.unparent();
-            }
-            self.bluetooth_action_popover.set_parent(row);
-            self.bluetooth_action_popover.popup();
+            self.show_bluetooth_action_popover_for_row(device, row);
         }
+    }
+
+    fn show_bluetooth_action_popover_for_row(
+        &self,
+        device: BluetoothDevice,
+        row: &gtk::ListBoxRow,
+    ) {
+        self.bluetooth_popover_device.replace(Some(device));
+        if self.bluetooth_action_popover.parent().is_some() {
+            self.bluetooth_action_popover.unparent();
+        }
+        self.bluetooth_action_popover.set_parent(row);
+        self.set_bluetooth_action_selection(0);
+        self.bluetooth_action_popover.popup();
+    }
+
+    fn close_bluetooth_action_popover(&self) {
+        self.bluetooth_action_popover.popdown();
+        self.bluetooth_popover_device.replace(None);
+        self.bluetooth_disconnect_button
+            .remove_css_class("bluetooth-action-selected");
+        self.bluetooth_remove_button
+            .remove_css_class("bluetooth-action-selected");
+        self.bluetooth_action_selected_index.set(0);
+    }
+
+    fn move_bluetooth_action_selection(&self, direction: KeyboardDirection) {
+        let current = self.bluetooth_action_selected_index.get().min(1);
+        let next = match direction {
+            KeyboardDirection::Up | KeyboardDirection::Left => current.saturating_sub(1),
+            KeyboardDirection::Down | KeyboardDirection::Right => (current + 1).min(1),
+        };
+        self.set_bluetooth_action_selection(next);
+    }
+
+    fn set_bluetooth_action_selection(&self, index: usize) {
+        self.bluetooth_disconnect_button
+            .remove_css_class("bluetooth-action-selected");
+        self.bluetooth_remove_button
+            .remove_css_class("bluetooth-action-selected");
+
+        let next = index.min(1);
+        self.bluetooth_action_selected_index.set(next);
+        let button = if next == 0 {
+            &self.bluetooth_disconnect_button
+        } else {
+            &self.bluetooth_remove_button
+        };
+        button.add_css_class("bluetooth-action-selected");
+        button.grab_focus();
+    }
+
+    fn activate_bluetooth_action_selection(&self) {
+        if self.bluetooth_action_selected_index.get().min(1) == 0 {
+            self.disconnect_bluetooth_popover_device();
+        } else {
+            self.remove_bluetooth_popover_device();
+        }
+    }
+
+    fn disconnect_bluetooth_popover_device(&self) {
+        let Some(device) = self.bluetooth_popover_device.borrow().clone() else {
+            return;
+        };
+
+        self.close_bluetooth_action_popover();
+        let Some(worker) = self.bluetooth_worker.clone() else {
+            self.set_bluetooth_error("Bluetooth backend unavailable");
+            return;
+        };
+
+        self.set_bluetooth_busy(true);
+        self.clear_bluetooth_error();
+        worker.disconnect(device.id, device.name);
+    }
+
+    fn remove_bluetooth_popover_device(&self) {
+        let Some(device) = self.bluetooth_popover_device.borrow().clone() else {
+            return;
+        };
+
+        self.close_bluetooth_action_popover();
+        let Some(worker) = self.bluetooth_worker.clone() else {
+            self.set_bluetooth_error("Bluetooth backend unavailable");
+            return;
+        };
+
+        self.set_bluetooth_busy(true);
+        self.clear_bluetooth_error();
+        worker.remove(device.id, device.name);
     }
 
     fn handle_bluetooth_event(&self, event: BluetoothEvent) {
@@ -1007,7 +1041,6 @@ impl SideMenuState {
                 self.set_bluetooth_busy(false);
                 self.bluetooth_devices.replace(devices);
                 self.rebuild_bluetooth_rows();
-                self.rebuild_controller_rows();
             }
             BluetoothEvent::OperationStarted(name) => {
                 self.set_bluetooth_busy(true);
@@ -1054,142 +1087,25 @@ impl SideMenuState {
 
     fn set_bluetooth_selection(&self, index: usize) {
         let rows = self.bluetooth_device_rows.borrow();
-        let previous = self.bluetooth_selected_index.get().min(rows.len());
-        if previous < rows.len() {
-            rows[previous].remove_css_class("bluetooth-device-selected");
-        } else {
-            self.bluetooth_reorder_button
-                .remove_css_class("bluetooth-device-selected");
+        if rows.is_empty() {
+            self.bluetooth_selected_index.set(0);
+            return;
         }
 
-        let next = index.min(rows.len());
+        let previous = self
+            .bluetooth_selected_index
+            .get()
+            .min(rows.len().saturating_sub(1));
+        rows[previous].remove_css_class("bluetooth-device-selected");
+
+        let next = index.min(rows.len().saturating_sub(1));
         self.bluetooth_selected_index.set(next);
-        if next < rows.len() {
-            rows[next].add_css_class("bluetooth-device-selected");
-            rows[next].grab_focus();
-        } else {
-            self.bluetooth_reorder_button
-                .add_css_class("bluetooth-device-selected");
-            self.bluetooth_reorder_button.grab_focus();
-        }
+        rows[next].add_css_class("bluetooth-device-selected");
+        rows[next].grab_focus();
     }
 
     fn bluetooth_selectable_count(&self) -> usize {
-        self.bluetooth_device_rows.borrow().len() + 1
-    }
-
-    fn move_controller_selection(&self, direction: KeyboardDirection) -> bool {
-        if !self.is_controller_panel_open() {
-            return false;
-        }
-
-        match direction {
-            KeyboardDirection::Left => self.move_controller_order(-1),
-            KeyboardDirection::Right => self.move_controller_order(1),
-            KeyboardDirection::Up | KeyboardDirection::Down => {
-                let row_count = self.controller_rows.borrow().len();
-                if row_count == 0 {
-                    return true;
-                }
-                let current = self.controller_selected_index.get().min(row_count - 1);
-                let next = match direction {
-                    KeyboardDirection::Up => current.saturating_sub(1),
-                    KeyboardDirection::Down => (current + 1).min(row_count - 1),
-                    KeyboardDirection::Left | KeyboardDirection::Right => current,
-                };
-                self.set_controller_selection(next);
-            }
-        }
-
-        true
-    }
-
-    fn move_controller_order(&self, delta: isize) {
-        let mut controllers = self.controller_order.borrow_mut();
-        if controllers.len() < 2 {
-            return;
-        }
-        let current = self
-            .controller_selected_index
-            .get()
-            .min(controllers.len().saturating_sub(1));
-        let next = if delta < 0 {
-            current.saturating_sub(1)
-        } else {
-            (current + 1).min(controllers.len() - 1)
-        };
-        if current == next {
-            return;
-        }
-        controllers.swap(current, next);
-        drop(controllers);
-        self.rebuild_controller_rows();
-        self.set_controller_selection(next);
-    }
-
-    fn rebuild_controller_rows(&self) {
-        while let Some(child) = self.controller_list.first_child() {
-            self.controller_list.remove(&child);
-        }
-
-        let connected_gamepads: Vec<_> = self
-            .bluetooth_devices
-            .borrow()
-            .iter()
-            .filter(|device| device.connected && device.gamepad)
-            .cloned()
-            .collect();
-
-        let mut current_order = self.controller_order.borrow().clone();
-        current_order.retain(|device| {
-            connected_gamepads
-                .iter()
-                .any(|candidate| candidate.id == device.id)
-        });
-        for device in connected_gamepads {
-            if !current_order
-                .iter()
-                .any(|candidate| candidate.id == device.id)
-            {
-                current_order.push(device);
-            }
-        }
-        self.controller_order.replace(current_order);
-
-        let controllers = self.controller_order.borrow();
-        let mut rows = Vec::new();
-        for (index, controller) in controllers.iter().enumerate() {
-            let row = build_controller_row(index, controller);
-            self.controller_list.append(&row);
-            rows.push(row);
-        }
-
-        if rows.is_empty() {
-            self.controller_list
-                .append(&build_bluetooth_placeholder_row("No connected gamepads"));
-        }
-
-        self.controller_rows.replace(rows);
-        let row_count = self.controller_rows.borrow().len();
-        if row_count > 0 {
-            self.set_controller_selection(self.controller_selected_index.get().min(row_count - 1));
-        } else {
-            self.controller_selected_index.set(0);
-        }
-    }
-
-    fn set_controller_selection(&self, index: usize) {
-        let rows = self.controller_rows.borrow();
-        if rows.is_empty() {
-            self.controller_selected_index.set(0);
-            return;
-        }
-        let previous = self.controller_selected_index.get().min(rows.len() - 1);
-        rows[previous].remove_css_class("controller-row-selected");
-        let next = index.min(rows.len() - 1);
-        self.controller_selected_index.set(next);
-        rows[next].add_css_class("controller-row-selected");
-        rows[next].grab_focus();
+        self.bluetooth_device_rows.borrow().len()
     }
 
     fn set_bluetooth_busy(&self, busy: bool) {
@@ -1222,10 +1138,6 @@ impl SideMenuState {
 
     fn is_bluetooth_panel_open(&self) -> bool {
         self.bluetooth_panel.get_visible()
-    }
-
-    fn is_controller_panel_open(&self) -> bool {
-        self.controller_panel.get_visible()
     }
 }
 
@@ -1290,8 +1202,7 @@ pub fn build_sidemenu() -> SideMenu {
 
     let wifi_widgets = build_wifi_widgets(wifi_worker.is_some());
     let task_widgets = build_task_widgets();
-    let bluetooth_widgets = build_bluetooth_widgets(bluetooth_worker.is_some());
-    let controller_widgets = build_controller_widgets();
+    let bluetooth_widgets = build_bluetooth_widgets();
 
     let mut rows = Vec::new();
     let mut row_kinds = Vec::new();
@@ -1346,7 +1257,6 @@ pub fn build_sidemenu() -> SideMenu {
     root_panel.append(&wifi_widgets.panel);
     root_panel.append(&task_widgets.panel);
     root_panel.append(&bluetooth_widgets.panel);
-    root_panel.append(&controller_widgets.panel);
 
     let revealer = gtk::Revealer::builder()
         .halign(gtk::Align::Start)
@@ -1367,7 +1277,6 @@ pub fn build_sidemenu() -> SideMenu {
         wifi_panel: wifi_widgets.panel.clone(),
         task_panel: task_widgets.panel.clone(),
         bluetooth_panel: bluetooth_widgets.panel.clone(),
-        controller_panel: controller_widgets.panel.clone(),
         rows,
         row_kinds,
         selected_index: Cell::new(0),
@@ -1400,17 +1309,15 @@ pub fn build_sidemenu() -> SideMenu {
         bluetooth_spinner: bluetooth_widgets.spinner.clone(),
         bluetooth_device_list: bluetooth_widgets.device_list.clone(),
         bluetooth_error_label: bluetooth_widgets.error_label.clone(),
-        bluetooth_reorder_button: bluetooth_widgets.reorder_button.clone(),
         bluetooth_action_popover: bluetooth_widgets.action_popover.clone(),
+        bluetooth_disconnect_button: bluetooth_widgets.disconnect_button.clone(),
+        bluetooth_remove_button: bluetooth_widgets.remove_button.clone(),
         bluetooth_devices: RefCell::new(Vec::new()),
         bluetooth_device_rows: RefCell::new(Vec::new()),
         bluetooth_selected_index: Cell::new(0),
+        bluetooth_action_selected_index: Cell::new(0),
         bluetooth_busy: Cell::new(false),
         bluetooth_popover_device: RefCell::new(None),
-        controller_list: controller_widgets.list.clone(),
-        controller_rows: RefCell::new(Vec::new()),
-        controller_order: RefCell::new(Vec::new()),
-        controller_selected_index: Cell::new(0),
     });
     state.rows[0].add_css_class("side-menu-selected");
 
@@ -1453,15 +1360,9 @@ struct BluetoothWidgets {
     spinner: gtk::Spinner,
     device_list: gtk::ListBox,
     error_label: gtk::Label,
-    reorder_button: gtk::Button,
     action_popover: gtk::Popover,
     disconnect_button: gtk::Button,
     remove_button: gtk::Button,
-}
-
-struct ControllerWidgets {
-    panel: gtk::Box,
-    list: gtk::ListBox,
 }
 
 fn build_volume_row(volume_scale: &gtk::Scale, mute_button: &gtk::Button) -> gtk::ListBoxRow {
@@ -1696,7 +1597,7 @@ fn build_task_widgets() -> TaskWidgets {
     }
 }
 
-fn build_bluetooth_widgets(bluetooth_available: bool) -> BluetoothWidgets {
+fn build_bluetooth_widgets() -> BluetoothWidgets {
     let icon = gtk::Image::from_icon_name("bluetooth-active-symbolic");
     let title = gtk::Label::builder()
         .label("Bluetooth")
@@ -1728,22 +1629,14 @@ fn build_bluetooth_widgets(bluetooth_available: bool) -> BluetoothWidgets {
         .build();
     error_label.add_css_class("bluetooth-error");
 
-    let reorder_button = gtk::Button::builder()
+    let disconnect_button = gtk::Button::builder()
         .can_focus(true)
         .focusable(true)
-        .label("Reorder Controllers")
-        .sensitive(bluetooth_available)
-        .build();
-    reorder_button.add_css_class("side-menu-action-button");
-
-    let disconnect_button = gtk::Button::builder()
-        .can_focus(false)
-        .focusable(false)
         .label("Disconnect")
         .build();
     let remove_button = gtk::Button::builder()
-        .can_focus(false)
-        .focusable(false)
+        .can_focus(true)
+        .focusable(true)
         .label("Remove")
         .build();
     disconnect_button.add_css_class("side-menu-action-button");
@@ -1765,7 +1658,7 @@ fn build_bluetooth_widgets(bluetooth_available: bool) -> BluetoothWidgets {
     action_popover.set_child(Some(&popover_box));
 
     let hint = gtk::Label::builder()
-        .label("Y scans. Hold A on a connected device for actions.")
+        .label("Y scans. A connects or opens actions for connected devices.")
         .halign(gtk::Align::Start)
         .wrap(true)
         .build();
@@ -1782,7 +1675,6 @@ fn build_bluetooth_widgets(bluetooth_available: bool) -> BluetoothWidgets {
     content.append(&header);
     content.append(&device_list);
     content.append(&error_label);
-    content.append(&reorder_button);
     content.append(&hint);
 
     let panel = gtk::Box::builder()
@@ -1800,65 +1692,10 @@ fn build_bluetooth_widgets(bluetooth_available: bool) -> BluetoothWidgets {
         spinner,
         device_list,
         error_label,
-        reorder_button,
         action_popover,
         disconnect_button,
         remove_button,
     }
-}
-
-fn build_controller_widgets() -> ControllerWidgets {
-    let icon = gtk::Image::from_icon_name("input-gaming-symbolic");
-    let title = gtk::Label::builder()
-        .label("Controller Order")
-        .halign(gtk::Align::Start)
-        .hexpand(true)
-        .build();
-    title.add_css_class("heading");
-
-    let header = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .spacing(8)
-        .build();
-    header.add_css_class("controller-section-header");
-    header.append(&icon);
-    header.append(&title);
-
-    let list = gtk::ListBox::builder()
-        .selection_mode(gtk::SelectionMode::None)
-        .build();
-    list.add_css_class("controller-list");
-
-    let hint = gtk::Label::builder()
-        .label("Left and Right move the selected controller in GameEase priority.")
-        .halign(gtk::Align::Start)
-        .wrap(true)
-        .build();
-    hint.add_css_class("bluetooth-hint");
-
-    let content = gtk::Box::builder()
-        .margin_bottom(10)
-        .margin_end(10)
-        .margin_start(10)
-        .margin_top(10)
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(8)
-        .build();
-    content.append(&header);
-    content.append(&list);
-    content.append(&hint);
-
-    let panel = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .vexpand(true)
-        .visible(false)
-        .width_request(CONTROLLER_PANEL_WIDTH)
-        .build();
-    panel.add_css_class("side-menu");
-    panel.add_css_class("controller-panel");
-    panel.append(&content);
-
-    ControllerWidgets { panel, list }
 }
 
 fn build_wifi_network_row(network: &WifiNetwork, connecting: bool) -> gtk::ListBoxRow {
@@ -2040,38 +1877,6 @@ fn build_bluetooth_device_row(device: &BluetoothDevice) -> gtk::ListBoxRow {
     row
 }
 
-fn build_controller_row(index: usize, device: &BluetoothDevice) -> gtk::ListBoxRow {
-    let player = gtk::Label::builder()
-        .label(&format!("P{}", index + 1))
-        .width_request(32)
-        .build();
-    player.add_css_class("controller-player-badge");
-
-    let name = gtk::Label::builder()
-        .label(&device.name)
-        .halign(gtk::Align::Start)
-        .hexpand(true)
-        .wrap(true)
-        .build();
-
-    let row_box = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .spacing(8)
-        .build();
-    row_box.append(&player);
-    row_box.append(&name);
-
-    let row = gtk::ListBoxRow::builder()
-        .activatable(false)
-        .can_focus(true)
-        .focusable(true)
-        .selectable(false)
-        .child(&row_box)
-        .build();
-    row.add_css_class("controller-row");
-    row
-}
-
 fn build_task_placeholder_row(label: &str) -> gtk::ListBoxRow {
     let row_label = gtk::Label::builder()
         .label(label)
@@ -2228,37 +2033,14 @@ fn install_bluetooth_handlers(state: &Rc<SideMenuState>, widgets: &BluetoothWidg
         }
     });
 
-    let state_for_reorder = Rc::clone(state);
-    widgets.reorder_button.connect_clicked(move |_| {
-        state_for_reorder.open_controller_panel();
-    });
-
     let state_for_disconnect = Rc::clone(state);
     widgets.disconnect_button.connect_clicked(move |_| {
-        let Some(device) = state_for_disconnect
-            .bluetooth_popover_device
-            .borrow()
-            .clone()
-        else {
-            return;
-        };
-        state_for_disconnect.bluetooth_action_popover.popdown();
-        if let Some(worker) = state_for_disconnect.bluetooth_worker.clone() {
-            state_for_disconnect.set_bluetooth_busy(true);
-            worker.disconnect(device.id, device.name);
-        }
+        state_for_disconnect.disconnect_bluetooth_popover_device();
     });
 
     let state_for_remove = Rc::clone(state);
     widgets.remove_button.connect_clicked(move |_| {
-        let Some(device) = state_for_remove.bluetooth_popover_device.borrow().clone() else {
-            return;
-        };
-        state_for_remove.bluetooth_action_popover.popdown();
-        if let Some(worker) = state_for_remove.bluetooth_worker.clone() {
-            state_for_remove.set_bluetooth_busy(true);
-            worker.remove(device.id, device.name);
-        }
+        state_for_remove.remove_bluetooth_popover_device();
     });
 }
 
@@ -2420,31 +2202,26 @@ fn install_css() {
             color: #ffb4a8;
         }
 
-        .bluetooth-section-header,
-        .controller-section-header {
+        .bluetooth-section-header {
             margin-bottom: 2px;
         }
 
-        .bluetooth-device-list,
-        .controller-list {
+        .bluetooth-device-list {
             background: transparent;
         }
 
         .bluetooth-device-row,
-        .bluetooth-placeholder-row,
-        .controller-row {
+        .bluetooth-placeholder-row {
             border-radius: 4px;
             padding: 6px;
         }
 
-        .bluetooth-device-selected,
-        .controller-row-selected {
+        .bluetooth-device-selected {
             background: rgba(255, 255, 255, 0.14);
             outline: 2px solid #72c7d8;
         }
 
-        .bluetooth-connected-badge,
-        .controller-player-badge {
+        .bluetooth-connected-badge {
             background: rgba(114, 199, 216, 0.24);
             border-radius: 4px;
             padding: 2px 5px;
@@ -2468,6 +2245,11 @@ fn install_css() {
         .bluetooth-action-popover {
             background: rgba(20, 20, 20, 0.96);
             color: white;
+        }
+
+        .bluetooth-action-selected {
+            background: rgba(255, 255, 255, 0.16);
+            outline: 2px solid #72c7d8;
         }
         ",
     );

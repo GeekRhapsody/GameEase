@@ -361,10 +361,13 @@ fn devices_from_objects(objects: &ManagedObjects) -> Vec<BluetoothDevice> {
             continue;
         };
         let address = string_prop(props, "Address").unwrap_or_default();
-        let name = string_prop(props, "Alias")
+        let Some(name) = string_prop(props, "Alias")
             .or_else(|| string_prop(props, "Name"))
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| address.clone());
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case(&address))
+        else {
+            continue;
+        };
         let paired = bool_prop(props, "Paired").unwrap_or(false);
         let connected = bool_prop(props, "Connected").unwrap_or(false);
         let icon = string_prop(props, "Icon").unwrap_or_default();

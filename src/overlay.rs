@@ -567,13 +567,6 @@ fn install_sidemenu_toggle(
                         );
                     }
                 }
-                SideMenuCommand::LongActivateSelection => {
-                    if sidemenu.revealer().reveals_child()
-                        && !(keyboard.get_visible() && sidemenu.is_keyboard_entry_active())
-                    {
-                        sidemenu.long_activate_selected();
-                    }
-                }
                 SideMenuCommand::ToggleScan => {
                     if sidemenu.revealer().reveals_child()
                         && !(keyboard.get_visible() && sidemenu.is_keyboard_entry_active())
