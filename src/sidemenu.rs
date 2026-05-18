@@ -10,8 +10,9 @@ use gtk4 as gtk;
 use crate::audio::{AudioController, AudioSnapshot, SharedAudioController};
 use crate::bluetooth::{BluetoothDevice, BluetoothEvent, BluetoothManager, BluetoothWorker};
 use crate::config::{
-    self, AppConfig, DESKTOP_MOUSE_SENSITIVITY_STEP, MAX_DESKTOP_MOUSE_SENSITIVITY,
-    MIN_DESKTOP_MOUSE_SENSITIVITY,
+    self, AppConfig, DESKTOP_MOUSE_SENSITIVITY_STEP, MAX_DESKTOP_MOUSE_SENSITIVITY, MAX_OSK_SCALE,
+    MAX_UI_SCALE, MIN_DESKTOP_MOUSE_SENSITIVITY, MIN_OSK_SCALE, MIN_UI_SCALE, OSK_SCALE_STEP,
+    UI_SCALE_STEP,
 };
 use crate::gamepad::{GamepadGrabCommand, KeyboardDirection};
 use crate::tasks::{TaskEntry, TaskManager};
@@ -49,6 +50,7 @@ enum SideMenuRowKind {
 struct SideMenuState {
     revealer: gtk::Revealer,
     root_panel: gtk::Box,
+    side_panel: gtk::Box,
     wifi_panel: gtk::Box,
     task_panel: gtk::Box,
     bluetooth_panel: gtk::Box,
@@ -96,7 +98,14 @@ struct SideMenuState {
     bluetooth_popover_device: RefCell<Option<BluetoothDevice>>,
     config: RefCell<AppConfig>,
     config_sender: Sender<GamepadGrabCommand>,
+    osk_scale_changed: Rc<dyn Fn(f32)>,
+    layout_changed: Rc<dyn Fn()>,
+    css_provider: gtk::CssProvider,
+    ui_scale: gtk::Scale,
+    osk_scale: gtk::Scale,
     desktop_sensitivity_scale: gtk::Scale,
+    config_rows: Vec<gtk::Box>,
+    config_selected_index: Cell<usize>,
     updating_config_widgets: Cell<bool>,
 }
 
@@ -243,6 +252,51 @@ impl SideMenuState {
         self.row_kinds[self.selected_index.get()]
     }
 
+    fn current_ui_scale(&self) -> f32 {
+        config::sanitize_ui_scale(self.config.borrow().general.ui_scale)
+    }
+
+    fn scaled_width(&self, width: i32) -> i32 {
+        scaled_dimension(width, self.current_ui_scale())
+    }
+
+    fn set_root_width(&self, width: i32) {
+        let width = self.scaled_width(width);
+        self.root_panel.set_width_request(width);
+        self.revealer.set_width_request(width);
+    }
+
+    fn active_root_width(&self) -> i32 {
+        if self.is_wifi_panel_open() {
+            SIDE_MENU_WIDTH + WIFI_PANEL_WIDTH
+        } else if self.is_task_panel_open() {
+            SIDE_MENU_WIDTH + TASK_PANEL_WIDTH
+        } else if self.is_bluetooth_panel_open() {
+            SIDE_MENU_WIDTH + BLUETOOTH_PANEL_WIDTH
+        } else if self.is_config_panel_open() {
+            SIDE_MENU_WIDTH + CONFIG_PANEL_WIDTH
+        } else {
+            SIDE_MENU_WIDTH
+        }
+    }
+
+    fn apply_ui_scale(&self) {
+        let scale = self.current_ui_scale();
+        load_scaled_css(&self.css_provider, scale);
+        self.side_panel
+            .set_width_request(scaled_dimension(SIDE_MENU_WIDTH, scale));
+        self.wifi_panel
+            .set_width_request(scaled_dimension(WIFI_PANEL_WIDTH, scale));
+        self.task_panel
+            .set_width_request(scaled_dimension(TASK_PANEL_WIDTH, scale));
+        self.bluetooth_panel
+            .set_width_request(scaled_dimension(BLUETOOTH_PANEL_WIDTH, scale));
+        self.config_panel
+            .set_width_request(scaled_dimension(CONFIG_PANEL_WIDTH, scale));
+        self.set_root_width(self.active_root_width());
+        (self.layout_changed)();
+    }
+
     fn select(&self, index: usize) {
         self.rows[self.selected_index.get()].remove_css_class("side-menu-selected");
         self.selected_index.set(index);
@@ -342,10 +396,7 @@ impl SideMenuState {
         self.close_bluetooth_panel();
         self.close_config_panel();
         self.task_panel.set_visible(true);
-        self.root_panel
-            .set_width_request(SIDE_MENU_WIDTH + TASK_PANEL_WIDTH);
-        self.revealer
-            .set_width_request(SIDE_MENU_WIDTH + TASK_PANEL_WIDTH);
+        self.set_root_width(SIDE_MENU_WIDTH + TASK_PANEL_WIDTH);
         self.refresh_tasks();
     }
 
@@ -355,8 +406,7 @@ impl SideMenuState {
         }
 
         self.task_panel.set_visible(false);
-        self.root_panel.set_width_request(SIDE_MENU_WIDTH);
-        self.revealer.set_width_request(SIDE_MENU_WIDTH);
+        self.set_root_width(SIDE_MENU_WIDTH);
         self.rows[self.selected_index.get()].grab_focus();
     }
 
@@ -635,10 +685,7 @@ impl SideMenuState {
         self.close_bluetooth_panel();
         self.close_config_panel();
         self.wifi_panel.set_visible(true);
-        self.root_panel
-            .set_width_request(SIDE_MENU_WIDTH + WIFI_PANEL_WIDTH);
-        self.revealer
-            .set_width_request(SIDE_MENU_WIDTH + WIFI_PANEL_WIDTH);
+        self.set_root_width(SIDE_MENU_WIDTH + WIFI_PANEL_WIDTH);
         self.set_wifi_selection(self.wifi_selected_index.get());
         self.scan_wifi();
     }
@@ -654,8 +701,7 @@ impl SideMenuState {
         self.wifi_password_error.set_text("");
         self.wifi_password_error.set_visible(false);
         self.wifi_panel.set_visible(false);
-        self.root_panel.set_width_request(SIDE_MENU_WIDTH);
-        self.revealer.set_width_request(SIDE_MENU_WIDTH);
+        self.set_root_width(SIDE_MENU_WIDTH);
         self.wifi_scan_button
             .remove_css_class("wifi-network-selected");
         self.rows[self.selected_index.get()].grab_focus();
@@ -853,10 +899,7 @@ impl SideMenuState {
         self.close_task_panel();
         self.close_config_panel();
         self.bluetooth_panel.set_visible(true);
-        self.root_panel
-            .set_width_request(SIDE_MENU_WIDTH + BLUETOOTH_PANEL_WIDTH);
-        self.revealer
-            .set_width_request(SIDE_MENU_WIDTH + BLUETOOTH_PANEL_WIDTH);
+        self.set_root_width(SIDE_MENU_WIDTH + BLUETOOTH_PANEL_WIDTH);
         self.set_bluetooth_selection(self.bluetooth_selected_index.get());
         self.refresh_bluetooth();
     }
@@ -868,8 +911,7 @@ impl SideMenuState {
 
         self.close_bluetooth_action_popover();
         self.bluetooth_panel.set_visible(false);
-        self.root_panel.set_width_request(SIDE_MENU_WIDTH);
-        self.revealer.set_width_request(SIDE_MENU_WIDTH);
+        self.set_root_width(SIDE_MENU_WIDTH);
         self.rows[self.selected_index.get()].grab_focus();
     }
 
@@ -882,11 +924,8 @@ impl SideMenuState {
         self.close_task_panel();
         self.close_bluetooth_panel();
         self.config_panel.set_visible(true);
-        self.root_panel
-            .set_width_request(SIDE_MENU_WIDTH + CONFIG_PANEL_WIDTH);
-        self.revealer
-            .set_width_request(SIDE_MENU_WIDTH + CONFIG_PANEL_WIDTH);
-        self.desktop_sensitivity_scale.grab_focus();
+        self.set_root_width(SIDE_MENU_WIDTH + CONFIG_PANEL_WIDTH);
+        self.set_config_selection(self.config_selected_index.get());
     }
 
     fn close_config_panel(&self) {
@@ -895,8 +934,7 @@ impl SideMenuState {
         }
 
         self.config_panel.set_visible(false);
-        self.root_panel.set_width_request(SIDE_MENU_WIDTH);
-        self.revealer.set_width_request(SIDE_MENU_WIDTH);
+        self.set_root_width(SIDE_MENU_WIDTH);
         self.rows[self.selected_index.get()].grab_focus();
     }
 
@@ -906,11 +944,39 @@ impl SideMenuState {
         }
 
         match direction {
-            KeyboardDirection::Left => self.adjust_desktop_mouse_sensitivity(-1.0),
-            KeyboardDirection::Right => self.adjust_desktop_mouse_sensitivity(1.0),
-            KeyboardDirection::Up | KeyboardDirection::Down => {}
+            KeyboardDirection::Left => self.adjust_selected_config_slider(-1.0),
+            KeyboardDirection::Right => self.adjust_selected_config_slider(1.0),
+            KeyboardDirection::Up => {
+                self.set_config_selection(self.config_selected_index.get().saturating_sub(1));
+            }
+            KeyboardDirection::Down => {
+                let last = self.config_rows.len().saturating_sub(1);
+                self.set_config_selection((self.config_selected_index.get() + 1).min(last));
+            }
         }
         true
+    }
+
+    fn adjust_selected_config_slider(&self, direction: f64) {
+        match self.config_selected_index.get() {
+            0 => self.adjust_ui_scale(direction),
+            1 => self.adjust_osk_scale(direction),
+            _ => self.adjust_desktop_mouse_sensitivity(direction),
+        }
+    }
+
+    fn adjust_ui_scale(&self, direction: f64) {
+        let step = f64::from(UI_SCALE_STEP);
+        let next = (self.ui_scale.value() + direction * step)
+            .clamp(f64::from(MIN_UI_SCALE), f64::from(MAX_UI_SCALE));
+        self.set_ui_scale_from_ui(next);
+    }
+
+    fn adjust_osk_scale(&self, direction: f64) {
+        let step = f64::from(OSK_SCALE_STEP);
+        let next = (self.osk_scale.value() + direction * step)
+            .clamp(f64::from(MIN_OSK_SCALE), f64::from(MAX_OSK_SCALE));
+        self.set_osk_scale_from_ui(next);
     }
 
     fn adjust_desktop_mouse_sensitivity(&self, direction: f64) {
@@ -920,6 +986,65 @@ impl SideMenuState {
             f64::from(MAX_DESKTOP_MOUSE_SENSITIVITY),
         );
         self.set_desktop_mouse_sensitivity_from_ui(next);
+    }
+
+    fn set_config_selection(&self, index: usize) {
+        if self.config_rows.is_empty() {
+            self.config_selected_index.set(0);
+            return;
+        }
+
+        let previous = self
+            .config_selected_index
+            .get()
+            .min(self.config_rows.len().saturating_sub(1));
+        self.config_rows[previous].remove_css_class("config-row-selected");
+
+        let next = index.min(self.config_rows.len().saturating_sub(1));
+        self.config_selected_index.set(next);
+        self.config_rows[next].add_css_class("config-row-selected");
+
+        if self.is_config_panel_open() {
+            match next {
+                0 => self.ui_scale.grab_focus(),
+                1 => self.osk_scale.grab_focus(),
+                _ => self.desktop_sensitivity_scale.grab_focus(),
+            };
+        }
+    }
+
+    fn set_ui_scale_from_ui(&self, value: f64) {
+        let scale = config::sanitize_ui_scale(value as f32);
+        self.updating_config_widgets.set(true);
+        self.ui_scale.set_value(f64::from(scale));
+        self.updating_config_widgets.set(false);
+
+        {
+            let mut config = self.config.borrow_mut();
+            config.general.ui_scale = scale;
+            if let Err(error) = config::save_config(&config) {
+                eprintln!("Failed to save GameEase configuration: {error:#}");
+            }
+        }
+
+        self.apply_ui_scale();
+    }
+
+    fn set_osk_scale_from_ui(&self, value: f64) {
+        let scale = config::sanitize_osk_scale(value as f32);
+        self.updating_config_widgets.set(true);
+        self.osk_scale.set_value(f64::from(scale));
+        self.updating_config_widgets.set(false);
+
+        {
+            let mut config = self.config.borrow_mut();
+            config.on_screen_keyboard.scale = scale;
+            if let Err(error) = config::save_config(&config) {
+                eprintln!("Failed to save GameEase configuration: {error:#}");
+            }
+        }
+
+        (self.osk_scale_changed)(scale);
     }
 
     fn set_desktop_mouse_sensitivity_from_ui(&self, value: f64) {
@@ -1244,10 +1369,14 @@ impl SideMenuState {
 }
 
 /// Builds the slide-in side menu revealer.
-pub fn build_sidemenu(config_sender: Sender<GamepadGrabCommand>) -> SideMenu {
-    install_css();
+pub fn build_sidemenu(
+    app_config: AppConfig,
+    config_sender: Sender<GamepadGrabCommand>,
+    osk_scale_changed: Rc<dyn Fn(f32)>,
+    layout_changed: Rc<dyn Fn()>,
+) -> SideMenu {
+    let css_provider = install_css(app_config.general.ui_scale);
 
-    let app_config = config::load_config_or_default();
     let _ = config_sender.send(GamepadGrabCommand::SetDesktopMouseSensitivity(
         app_config.desktop_mode.mouse_sensitivity,
     ));
@@ -1349,7 +1478,10 @@ pub fn build_sidemenu(config_sender: Sender<GamepadGrabCommand>) -> SideMenu {
     let panel = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .vexpand(true)
-        .width_request(SIDE_MENU_WIDTH)
+        .width_request(scaled_dimension(
+            SIDE_MENU_WIDTH,
+            app_config.general.ui_scale,
+        ))
         .build();
     panel.add_css_class("side-menu");
     panel.append(&header);
@@ -1359,7 +1491,10 @@ pub fn build_sidemenu(config_sender: Sender<GamepadGrabCommand>) -> SideMenu {
     let root_panel = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .vexpand(true)
-        .width_request(SIDE_MENU_WIDTH)
+        .width_request(scaled_dimension(
+            SIDE_MENU_WIDTH,
+            app_config.general.ui_scale,
+        ))
         .build();
     root_panel.append(&panel);
     root_panel.append(&wifi_widgets.panel);
@@ -1374,7 +1509,10 @@ pub fn build_sidemenu(config_sender: Sender<GamepadGrabCommand>) -> SideMenu {
         .transition_type(gtk::RevealerTransitionType::SlideRight)
         .valign(gtk::Align::Fill)
         .vexpand(true)
-        .width_request(SIDE_MENU_WIDTH)
+        .width_request(scaled_dimension(
+            SIDE_MENU_WIDTH,
+            app_config.general.ui_scale,
+        ))
         .build();
     revealer.set_child(Some(&root_panel));
     revealer.set_reveal_child(false);
@@ -1383,6 +1521,7 @@ pub fn build_sidemenu(config_sender: Sender<GamepadGrabCommand>) -> SideMenu {
     let state = Rc::new(SideMenuState {
         revealer: revealer.clone(),
         root_panel: root_panel.clone(),
+        side_panel: panel.clone(),
         wifi_panel: wifi_widgets.panel.clone(),
         task_panel: task_widgets.panel.clone(),
         bluetooth_panel: bluetooth_widgets.panel.clone(),
@@ -1430,10 +1569,19 @@ pub fn build_sidemenu(config_sender: Sender<GamepadGrabCommand>) -> SideMenu {
         bluetooth_popover_device: RefCell::new(None),
         config: RefCell::new(app_config),
         config_sender,
+        osk_scale_changed,
+        layout_changed,
+        css_provider,
+        ui_scale: config_widgets.ui_scale.clone(),
+        osk_scale: config_widgets.osk_scale.clone(),
         desktop_sensitivity_scale: config_widgets.desktop_sensitivity_scale.clone(),
+        config_rows: config_widgets.rows.clone(),
+        config_selected_index: Cell::new(0),
         updating_config_widgets: Cell::new(false),
     });
     state.rows[0].add_css_class("side-menu-selected");
+    state.set_config_selection(0);
+    state.apply_ui_scale();
 
     install_volume_handlers(&state, &volume_scale, &mute_button);
     install_wifi_handlers(&state, &wifi_widgets);
@@ -1482,7 +1630,10 @@ struct BluetoothWidgets {
 
 struct ConfigWidgets {
     panel: gtk::Box,
+    ui_scale: gtk::Scale,
+    osk_scale: gtk::Scale,
     desktop_sensitivity_scale: gtk::Scale,
+    rows: Vec<gtk::Box>,
 }
 
 fn build_volume_row(volume_scale: &gtk::Scale, mute_button: &gtk::Button) -> gtk::ListBoxRow {
@@ -1825,7 +1976,29 @@ fn build_config_widgets(config: &AppConfig) -> ConfigWidgets {
         .build();
     title.add_css_class("heading");
 
+    let ui_scale = gtk::Scale::with_range(
+        gtk::Orientation::Horizontal,
+        f64::from(MIN_UI_SCALE),
+        f64::from(MAX_UI_SCALE),
+        f64::from(UI_SCALE_STEP),
+    );
+    configure_config_scale(&ui_scale, f64::from(config.general.ui_scale));
+    let ui_scale_row = build_config_slider_row("UI scale", &ui_scale);
+
     let general_group = build_config_group("General");
+    general_group.append(&ui_scale_row);
+
+    let osk_scale = gtk::Scale::with_range(
+        gtk::Orientation::Horizontal,
+        f64::from(MIN_OSK_SCALE),
+        f64::from(MAX_OSK_SCALE),
+        f64::from(OSK_SCALE_STEP),
+    );
+    configure_config_scale(&osk_scale, f64::from(config.on_screen_keyboard.scale));
+    let osk_scale_row = build_config_slider_row("OSK scale", &osk_scale);
+
+    let osk_group = build_config_group("On-Screen Keyboard");
+    osk_group.append(&osk_scale_row);
 
     let desktop_sensitivity_scale = gtk::Scale::with_range(
         gtk::Orientation::Horizontal,
@@ -1833,23 +2006,11 @@ fn build_config_widgets(config: &AppConfig) -> ConfigWidgets {
         f64::from(MAX_DESKTOP_MOUSE_SENSITIVITY),
         f64::from(DESKTOP_MOUSE_SENSITIVITY_STEP),
     );
-    desktop_sensitivity_scale.set_digits(2);
-    desktop_sensitivity_scale.set_draw_value(true);
-    desktop_sensitivity_scale.set_hexpand(true);
-    desktop_sensitivity_scale.set_value(f64::from(config.desktop_mode.mouse_sensitivity));
-
-    let sensitivity_label = gtk::Label::builder()
-        .label("Mouse sensitivity")
-        .halign(gtk::Align::Start)
-        .hexpand(true)
-        .build();
-
-    let sensitivity_row = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .spacing(8)
-        .build();
-    sensitivity_row.append(&sensitivity_label);
-    sensitivity_row.append(&desktop_sensitivity_scale);
+    configure_config_scale(
+        &desktop_sensitivity_scale,
+        f64::from(config.desktop_mode.mouse_sensitivity),
+    );
+    let sensitivity_row = build_config_slider_row("Mouse sensitivity", &desktop_sensitivity_scale);
 
     let desktop_group = build_config_group("Desktop Mode");
     desktop_group.append(&sensitivity_row);
@@ -1864,13 +2025,17 @@ fn build_config_widgets(config: &AppConfig) -> ConfigWidgets {
         .build();
     content.append(&title);
     content.append(&general_group);
+    content.append(&osk_group);
     content.append(&desktop_group);
 
     let panel = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .vexpand(true)
         .visible(false)
-        .width_request(CONFIG_PANEL_WIDTH)
+        .width_request(scaled_dimension(
+            CONFIG_PANEL_WIDTH,
+            config.general.ui_scale,
+        ))
         .build();
     panel.add_css_class("side-menu");
     panel.add_css_class("config-panel");
@@ -1878,8 +2043,36 @@ fn build_config_widgets(config: &AppConfig) -> ConfigWidgets {
 
     ConfigWidgets {
         panel,
+        ui_scale,
+        osk_scale,
         desktop_sensitivity_scale,
+        rows: vec![ui_scale_row, osk_scale_row, sensitivity_row],
     }
+}
+
+fn configure_config_scale(scale: &gtk::Scale, value: f64) {
+    scale.set_digits(2);
+    scale.set_draw_value(true);
+    scale.set_value_pos(gtk::PositionType::Right);
+    scale.set_hexpand(true);
+    scale.set_value(value);
+}
+
+fn build_config_slider_row(label: &str, scale: &gtk::Scale) -> gtk::Box {
+    let label = gtk::Label::builder()
+        .label(label)
+        .halign(gtk::Align::Start)
+        .hexpand(true)
+        .build();
+
+    let row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .build();
+    row.add_css_class("config-row");
+    row.append(&label);
+    row.append(scale);
+    row
 }
 
 fn build_config_group(title: &str) -> gtk::Box {
@@ -2245,6 +2438,24 @@ fn install_bluetooth_handlers(state: &Rc<SideMenuState>, widgets: &BluetoothWidg
 }
 
 fn install_config_handlers(state: &Rc<SideMenuState>, widgets: &ConfigWidgets) {
+    let state_for_ui_scale = Rc::clone(state);
+    widgets.ui_scale.connect_value_changed(move |scale| {
+        if state_for_ui_scale.updating_config_widgets.get() {
+            return;
+        }
+
+        state_for_ui_scale.set_ui_scale_from_ui(scale.value());
+    });
+
+    let state_for_osk_scale = Rc::clone(state);
+    widgets.osk_scale.connect_value_changed(move |scale| {
+        if state_for_osk_scale.updating_config_widgets.get() {
+            return;
+        }
+
+        state_for_osk_scale.set_osk_scale_from_ui(scale.value());
+    });
+
     let state_for_sensitivity = Rc::clone(state);
     widgets
         .desktop_sensitivity_scale
@@ -2316,9 +2527,9 @@ fn send_audio_result(sender: Sender<AudioUiMessage>, result: anyhow::Result<Audi
     let _ = sender.send(message);
 }
 
-fn install_css() {
+fn install_css(ui_scale: f32) -> gtk::CssProvider {
     let Some(display) = gtk::gdk::Display::default() else {
-        return;
+        return gtk::CssProvider::new();
     };
 
     let provider = gtk::CssProvider::new();
@@ -2483,4 +2694,93 @@ fn install_css() {
         &provider,
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
+
+    let scaled_provider = gtk::CssProvider::new();
+    load_scaled_css(&scaled_provider, ui_scale);
+    gtk::style_context_add_provider_for_display(
+        &display,
+        &scaled_provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+
+    scaled_provider
+}
+
+fn load_scaled_css(provider: &gtk::CssProvider, ui_scale: f32) {
+    let scale = config::sanitize_ui_scale(ui_scale);
+    provider.load_from_data(&format!(
+        "
+        .side-menu {{
+            font-size: {}px;
+        }}
+
+        .side-menu-icon-button {{
+            min-height: {}px;
+            min-width: {}px;
+            padding: {}px;
+        }}
+
+        .side-menu-action-button {{
+            min-height: {}px;
+            padding: {}px {}px;
+        }}
+
+        .side-menu-row label {{
+            margin: {}px {}px;
+        }}
+
+        .wifi-network-row,
+        .wifi-placeholder-row,
+        .task-row,
+        .task-placeholder-row,
+        .bluetooth-device-row,
+        .bluetooth-placeholder-row {{
+            padding: {}px;
+        }}
+
+        .config-row {{
+            border-radius: {}px;
+            padding: {}px;
+        }}
+
+        .config-row-selected {{
+            background: rgba(255, 255, 255, 0.14);
+            outline: {}px solid #72c7d8;
+        }}
+
+        .config-group {{
+            border-radius: {}px;
+            padding: {}px;
+        }}
+
+        .desktop-mode-notification {{
+            border-radius: {}px;
+            font-size: {}px;
+            padding: {}px {}px;
+        }}
+        ",
+        scaled_dimension(14, scale),
+        scaled_dimension(32, scale),
+        scaled_dimension(32, scale),
+        scaled_dimension(4, scale),
+        scaled_dimension(30, scale),
+        scaled_dimension(4, scale),
+        scaled_dimension(8, scale),
+        scaled_dimension(12, scale),
+        scaled_dimension(12, scale),
+        scaled_dimension(6, scale),
+        scaled_dimension(4, scale),
+        scaled_dimension(6, scale),
+        scaled_dimension(2, scale),
+        scaled_dimension(4, scale),
+        scaled_dimension(8, scale),
+        scaled_dimension(8, scale),
+        scaled_dimension(14, scale),
+        scaled_dimension(12, scale),
+        scaled_dimension(18, scale),
+    ));
+}
+
+fn scaled_dimension(base: i32, scale: f32) -> i32 {
+    ((base as f32) * scale).round().max(1.0) as i32
 }

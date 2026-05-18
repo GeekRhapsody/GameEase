@@ -10,12 +10,15 @@ use gtk::prelude::*;
 use gtk4 as gtk;
 use xkbcommon::xkb;
 
+use crate::config;
 use crate::gamepad::KeyboardDirection;
 use crate::uinput::SharedVirtualKeyboard;
 
 const INITIAL_ROW: usize = 2;
 const INITIAL_COLUMN: usize = 6;
 const GAMEPAD_HINT_ICON_SIZE: i32 = 40;
+const KEY_UNIT_SIZE: i32 = 58;
+const GRID_SPACING: i32 = 6;
 
 const KEY_ROWS: &[&[KeySpec]] = &[
     &[
@@ -457,6 +460,8 @@ struct KeyCell {
 
 struct KeyboardState {
     rows: Vec<Vec<KeyCell>>,
+    icons: Vec<gtk::Image>,
+    css_provider: gtk::CssProvider,
     selected_row: Cell<usize>,
     selected_column: Cell<usize>,
     shift_state: Rc<ShiftState>,
@@ -473,6 +478,29 @@ impl OnScreenKeyboard {
     /// Returns the GTK widget used for layout and input-region calculations.
     pub fn widget(&self) -> &gtk::Grid {
         &self.widget
+    }
+
+    /// Applies a scale multiplier to the OSK layout.
+    pub fn set_scale(&self, scale: f32) {
+        let scale = config::sanitize_osk_scale(scale);
+        self.widget
+            .set_column_spacing(scaled_dimension(GRID_SPACING, scale) as u32);
+        self.widget
+            .set_row_spacing(scaled_dimension(GRID_SPACING, scale) as u32);
+        load_scaled_css(&self.state.css_provider, scale);
+
+        for row in &self.state.rows {
+            for cell in row {
+                cell.button
+                    .set_width_request(scaled_dimension(cell.width * KEY_UNIT_SIZE, scale));
+                cell.button
+                    .set_height_request(scaled_dimension(KEY_UNIT_SIZE, scale));
+            }
+        }
+
+        for icon in &self.state.icons {
+            icon.set_pixel_size(scaled_dimension(GAMEPAD_HINT_ICON_SIZE, scale));
+        }
     }
 
     /// Moves the selected key in the requested direction.
@@ -806,7 +834,7 @@ pub fn build_keyboard(
     virtual_keyboard: SharedVirtualKeyboard,
     move_keyboard: Rc<dyn Fn()>,
 ) -> OnScreenKeyboard {
-    install_css();
+    let css_provider = install_css();
 
     let grid = gtk::Grid::builder()
         .column_homogeneous(true)
@@ -820,6 +848,7 @@ pub fn build_keyboard(
     let meta_active = Rc::new(Cell::new(false));
     let alt_active = Rc::new(Cell::new(false));
     let mut rows = Vec::new();
+    let mut icons = Vec::new();
 
     for (row_index, row) in KEY_ROWS.iter().enumerate() {
         let mut column_index = 0;
@@ -827,8 +856,8 @@ pub fn build_keyboard(
 
         for spec in row.iter() {
             let button = gtk::Button::builder()
-                .width_request(spec.width * 58)
-                .height_request(58)
+                .width_request(spec.width * KEY_UNIT_SIZE)
+                .height_request(KEY_UNIT_SIZE)
                 .can_focus(false)
                 .focus_on_click(false)
                 .focusable(false)
@@ -837,7 +866,11 @@ pub fn build_keyboard(
 
             let label = gtk::Label::new(Some(spec.label));
             label.set_xalign(0.5);
-            button.set_child(Some(&build_key_content(spec, &label)));
+            let (content, icon) = build_key_content(spec, &label);
+            if let Some(icon) = icon {
+                icons.push(icon);
+            }
+            button.set_child(Some(&content));
 
             if spec.label != spec.shifted_label || spec.label != spec.caps_label {
                 shift_state.add_label(
@@ -879,6 +912,8 @@ pub fn build_keyboard(
 
     let state = Rc::new(KeyboardState {
         rows,
+        icons,
+        css_provider,
         selected_row: Cell::new(INITIAL_ROW),
         selected_column: Cell::new(INITIAL_COLUMN),
         shift_state,
@@ -905,7 +940,7 @@ fn modifier_state_for_action(
     }
 }
 
-fn build_key_content(spec: &KeySpec, label: &gtk::Label) -> gtk::Box {
+fn build_key_content(spec: &KeySpec, label: &gtk::Label) -> (gtk::Box, Option<gtk::Image>) {
     let content = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(4)
@@ -913,15 +948,17 @@ fn build_key_content(spec: &KeySpec, label: &gtk::Label) -> gtk::Box {
         .valign(gtk::Align::Center)
         .build();
 
+    let mut icon_widget = None;
     if let Some(icon) = spec.icon {
         let image = gtk::Image::from_file(asset_path(icon));
         image.set_pixel_size(GAMEPAD_HINT_ICON_SIZE);
         image.add_css_class("osk-key-icon");
         content.append(&image);
+        icon_widget = Some(image);
     }
 
     content.append(label);
-    content
+    (content, icon_widget)
 }
 
 fn asset_path(relative_path: &str) -> PathBuf {
@@ -1012,9 +1049,9 @@ fn release_key(virtual_keyboard: &SharedVirtualKeyboard, key: Key) -> anyhow::Re
     virtual_keyboard.release(key)
 }
 
-fn install_css() {
+fn install_css() -> gtk::CssProvider {
     let Some(display) = gtk::gdk::Display::default() else {
-        return;
+        return gtk::CssProvider::new();
     };
 
     let provider = gtk::CssProvider::new();
@@ -1045,4 +1082,42 @@ fn install_css() {
         &provider,
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
+
+    let scaled_provider = gtk::CssProvider::new();
+    load_scaled_css(&scaled_provider, config::DEFAULT_OSK_SCALE);
+    gtk::style_context_add_provider_for_display(
+        &display,
+        &scaled_provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+
+    scaled_provider
+}
+
+fn load_scaled_css(provider: &gtk::CssProvider, scale: f32) {
+    let scale = config::sanitize_osk_scale(scale);
+    provider.load_from_data(&format!(
+        "
+        .osk-panel {{
+            padding: {}px;
+        }}
+
+        .osk-key {{
+            font-size: {}px;
+            padding: {}px;
+        }}
+
+        .osk-selected {{
+            border-width: {}px;
+        }}
+        ",
+        scaled_dimension(5, scale),
+        scaled_dimension(18, scale),
+        scaled_dimension(4, scale),
+        scaled_dimension(3, scale),
+    ));
+}
+
+fn scaled_dimension(base: i32, scale: f32) -> i32 {
+    ((base as f32) * scale).round().max(1.0) as i32
 }

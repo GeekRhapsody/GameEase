@@ -45,6 +45,7 @@ pub fn build_window(
     virtual_keyboard: SharedVirtualKeyboard,
 ) -> Result<gtk::ApplicationWindow> {
     install_overlay_css();
+    let app_config = crate::config::load_config_or_default();
 
     let window = gtk::ApplicationWindow::builder()
         .application(application)
@@ -69,9 +70,43 @@ pub fn build_window(
     window.set_exclusive_zone(0);
     window.set_keyboard_mode(KeyboardMode::None);
 
-    let sidemenu = sidemenu::build_sidemenu(grab_sender.clone());
-    let keyboard_placement = Rc::new(Cell::new(KeyboardPlacement::Bottom));
+    let keyboard_controller = Rc::new(RefCell::new(None::<OnScreenKeyboard>));
     let keyboard_widget = Rc::new(RefCell::new(None::<gtk::Grid>));
+    let sidemenu_revealer = Rc::new(RefCell::new(None::<gtk::Revealer>));
+
+    let layout_changed = {
+        let window = window.clone();
+        let keyboard_widget = keyboard_widget.clone();
+        let sidemenu_revealer = sidemenu_revealer.clone();
+        Rc::new(move || {
+            let Some(keyboard) = keyboard_widget.borrow().as_ref().cloned() else {
+                return;
+            };
+            let Some(sidemenu) = sidemenu_revealer.borrow().as_ref().cloned() else {
+                return;
+            };
+            schedule_input_region_update(&window, &keyboard, &sidemenu);
+            schedule_delayed_input_region_update(&window, &keyboard, &sidemenu);
+        })
+    };
+    let osk_scale_changed = {
+        let keyboard_controller = keyboard_controller.clone();
+        let layout_changed = layout_changed.clone();
+        Rc::new(move |scale| {
+            if let Some(keyboard) = keyboard_controller.borrow().as_ref().cloned() {
+                keyboard.set_scale(scale);
+                layout_changed();
+            }
+        })
+    };
+    let sidemenu = sidemenu::build_sidemenu(
+        app_config.clone(),
+        grab_sender.clone(),
+        osk_scale_changed,
+        layout_changed,
+    );
+    sidemenu_revealer.replace(Some(sidemenu.revealer().clone()));
+    let keyboard_placement = Rc::new(Cell::new(KeyboardPlacement::Bottom));
     let move_keyboard = {
         let window = window.clone();
         let sidemenu_revealer = sidemenu.revealer().clone();
@@ -95,6 +130,8 @@ pub fn build_window(
     };
 
     let keyboard = keyboard::build_keyboard(virtual_keyboard, move_keyboard);
+    keyboard.set_scale(app_config.on_screen_keyboard.scale);
+    keyboard_controller.replace(Some(keyboard.clone()));
     keyboard_widget.replace(Some(keyboard.widget().clone()));
     keyboard.widget().set_visible(false);
     apply_keyboard_placement(keyboard.widget(), KeyboardPlacement::Bottom);
