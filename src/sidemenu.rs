@@ -1639,10 +1639,10 @@ struct ConfigWidgets {
 fn build_volume_row(volume_scale: &gtk::Scale, mute_button: &gtk::Button) -> gtk::ListBoxRow {
     let speaker = gtk::Image::from_icon_name("audio-volume-high-symbolic");
     let box_ = gtk::Box::builder()
-        .margin_bottom(8)
+        .margin_bottom(11)
         .margin_end(10)
         .margin_start(10)
-        .margin_top(8)
+        .margin_top(11)
         .orientation(gtk::Orientation::Horizontal)
         .spacing(8)
         .build();
@@ -2333,10 +2333,10 @@ fn build_label_row(label: &str) -> gtk::ListBoxRow {
     let row_label = gtk::Label::builder()
         .label(label)
         .halign(gtk::Align::Start)
-        .margin_bottom(12)
+        .margin_bottom(15)
         .margin_end(12)
         .margin_start(12)
-        .margin_top(12)
+        .margin_top(15)
         .build();
     let row = gtk::ListBoxRow::builder()
         .activatable(false)
@@ -2542,6 +2542,7 @@ fn install_css(ui_scale: f32) -> gtk::CssProvider {
 
         .side-menu-row {
             border-radius: 4px;
+            margin: 2px 0;
         }
 
         .side-menu-selected {
@@ -2766,7 +2767,7 @@ fn load_scaled_css(provider: &gtk::CssProvider, ui_scale: f32) {
         scaled_dimension(30, scale),
         scaled_dimension(4, scale),
         scaled_dimension(8, scale),
-        scaled_dimension(12, scale),
+        scaled_dimension(15, scale),
         scaled_dimension(12, scale),
         scaled_dimension(6, scale),
         scaled_dimension(4, scale),
