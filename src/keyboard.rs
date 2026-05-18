@@ -6,6 +6,7 @@ use std::process::Command;
 use std::rc::Rc;
 
 use evdev::Key;
+use gtk::gdk_pixbuf::prelude::PixbufLoaderExt;
 use gtk::prelude::*;
 use gtk4 as gtk;
 use xkbcommon::xkb;
@@ -35,12 +36,7 @@ const KEY_ROWS: &[&[KeySpec]] = &[
         KeySpec::tap_shift("0", ")", Key::KEY_0, 1),
         KeySpec::tap_shift("-", "_", Key::KEY_MINUS, 1),
         KeySpec::tap_shift("=", "+", Key::KEY_EQUAL, 1),
-        KeySpec::tap_icon(
-            "Back",
-            Key::KEY_BACKSPACE,
-            2,
-            "assets/Positional_Prompts_Left.png",
-        ),
+        KeySpec::tap_icon("Back", Key::KEY_BACKSPACE, 2, "Positional_Prompts_Left.png"),
     ],
     &[
         KeySpec::tap("Tab", Key::KEY_TAB, 2),
@@ -71,10 +67,10 @@ const KEY_ROWS: &[&[KeySpec]] = &[
         KeySpec::tap_letter("l", "L", Key::KEY_L, 1),
         KeySpec::tap_shift(";", ":", Key::KEY_SEMICOLON, 1),
         KeySpec::tap_shift("'", "\"", Key::KEY_APOSTROPHE, 1),
-        KeySpec::tap_icon("Enter", Key::KEY_ENTER, 2, "assets/RT.png"),
+        KeySpec::tap_icon("Enter", Key::KEY_ENTER, 2, "RT.png"),
     ],
     &[
-        KeySpec::toggle_icon("Shift", Key::KEY_LEFTSHIFT, 2, "assets/LT.png"),
+        KeySpec::toggle_icon("Shift", Key::KEY_LEFTSHIFT, 2, "LT.png"),
         KeySpec::tap_letter("z", "Z", Key::KEY_Z, 1),
         KeySpec::tap_letter("x", "X", Key::KEY_X, 1),
         KeySpec::tap_letter("c", "C", Key::KEY_C, 1),
@@ -86,18 +82,13 @@ const KEY_ROWS: &[&[KeySpec]] = &[
         KeySpec::tap_shift(".", ">", Key::KEY_DOT, 1),
         KeySpec::tap_shift("/", "?", Key::KEY_SLASH, 1),
         KeySpec::tap("↑", Key::KEY_UP, 1),
-        KeySpec::toggle_icon("Shift", Key::KEY_RIGHTSHIFT, 2, "assets/LT.png"),
+        KeySpec::toggle_icon("Shift", Key::KEY_RIGHTSHIFT, 2, "LT.png"),
     ],
     &[
         KeySpec::toggle("Ctrl", Key::KEY_LEFTCTRL, 1),
         KeySpec::toggle("Meta", Key::KEY_LEFTMETA, 1),
         KeySpec::toggle("Alt", Key::KEY_LEFTALT, 1),
-        KeySpec::tap_icon(
-            "Space",
-            Key::KEY_SPACE,
-            8,
-            "assets/Positional_Prompts_Up.png",
-        ),
+        KeySpec::tap_icon("Space", Key::KEY_SPACE, 8, "Positional_Prompts_Up.png"),
         KeySpec::tap("←", Key::KEY_LEFT, 1),
         KeySpec::tap("↓", Key::KEY_DOWN, 1),
         KeySpec::tap("→", Key::KEY_RIGHT, 1),
@@ -218,7 +209,7 @@ impl KeySpec {
             shifted_label: label,
             caps_label: label,
             shift_caps_label: label,
-            icon: Some("assets/Left_Stick_Click.png"),
+            icon: Some("Left_Stick_Click.png"),
             action: KeyAction::CapsLock,
             width,
         }
@@ -230,7 +221,7 @@ impl KeySpec {
             shifted_label: label,
             caps_label: label,
             shift_caps_label: label,
-            icon: Some("assets/Share.png"),
+            icon: Some("Share.png"),
             action: KeyAction::MoveKeyboard,
             width,
         }
@@ -950,7 +941,7 @@ fn build_key_content(spec: &KeySpec, label: &gtk::Label) -> (gtk::Box, Option<gt
 
     let mut icon_widget = None;
     if let Some(icon) = spec.icon {
-        let image = gtk::Image::from_file(asset_path(icon));
+        let image = embedded_icon_image(icon);
         image.set_pixel_size(GAMEPAD_HINT_ICON_SIZE);
         image.add_css_class("osk-key-icon");
         content.append(&image);
@@ -961,8 +952,43 @@ fn build_key_content(spec: &KeySpec, label: &gtk::Label) -> (gtk::Box, Option<gt
     (content, icon_widget)
 }
 
-fn asset_path(relative_path: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative_path)
+fn embedded_icon_image(name: &str) -> gtk::Image {
+    let Some(bytes) = embedded_icon_bytes(name) else {
+        eprintln!("Missing embedded OSK icon asset: {name}");
+        return gtk::Image::new();
+    };
+
+    let loader = gtk::gdk_pixbuf::PixbufLoader::new();
+    if let Err(error) = loader.write(bytes) {
+        eprintln!("Failed to decode embedded OSK icon asset {name}: {error}");
+        return gtk::Image::new();
+    }
+    if let Err(error) = loader.close() {
+        eprintln!("Failed to finish loading embedded OSK icon asset {name}: {error}");
+        return gtk::Image::new();
+    }
+
+    loader
+        .pixbuf()
+        .map(|pixbuf| gtk::Image::from_pixbuf(Some(&pixbuf)))
+        .unwrap_or_else(|| {
+            eprintln!("Embedded OSK icon asset {name} did not produce a pixbuf");
+            gtk::Image::new()
+        })
+}
+
+fn embedded_icon_bytes(name: &str) -> Option<&'static [u8]> {
+    match name {
+        "LT.png" => Some(include_bytes!("../assets/LT.png")),
+        "RT.png" => Some(include_bytes!("../assets/RT.png")),
+        "Share.png" => Some(include_bytes!("../assets/Share.png")),
+        "Left_Stick_Click.png" => Some(include_bytes!("../assets/Left_Stick_Click.png")),
+        "Positional_Prompts_Left.png" => {
+            Some(include_bytes!("../assets/Positional_Prompts_Left.png"))
+        }
+        "Positional_Prompts_Up.png" => Some(include_bytes!("../assets/Positional_Prompts_Up.png")),
+        _ => None,
+    }
 }
 
 fn connect_button(

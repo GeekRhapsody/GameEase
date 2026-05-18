@@ -132,7 +132,6 @@ jobs:
           install -Dm755 target/release/gameease "target/package/${package}/gameease"
           install -Dm644 README.md "target/package/${package}/README.md"
           cp -a dist "target/package/${package}/dist"
-          cp -a assets "target/package/${package}/assets"
 
           tar -C target/package -czf "target/package/${package}.tar.gz" "${package}"
           sha256sum "target/package/${package}.tar.gz" > "target/package/${package}.tar.gz.sha256"
