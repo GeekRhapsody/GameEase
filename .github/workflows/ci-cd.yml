@@ -1,0 +1,114 @@
+name: CI/CD
+
+on:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "v*.*.*"
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libgtk-4-dev \
+            libgtk-layer-shell-dev \
+            libpulse-dev \
+            libudev-dev \
+            libxkbcommon-dev \
+            pkg-config
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Build debug
+        run: cargo build --locked
+
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libgtk-4-dev \
+            libgtk-layer-shell-dev \
+            libpulse-dev \
+            libudev-dev \
+            libxkbcommon-dev \
+            pkg-config
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package release assets
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          package="gameease-${TAG_NAME}-linux-x86_64"
+          mkdir -p "target/package/${package}"
+
+          install -Dm755 target/release/gameease "target/package/${package}/gameease"
+          install -Dm644 README.md "target/package/${package}/README.md"
+          cp -a dist "target/package/${package}/dist"
+          cp -a assets "target/package/${package}/assets"
+
+          tar -C target/package -czf "target/package/${package}.tar.gz" "${package}"
+          sha256sum "target/package/${package}.tar.gz" > "target/package/${package}.tar.gz.sha256"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          package="gameease-${TAG_NAME}-linux-x86_64"
+          assets=(
+            "target/package/${package}.tar.gz"
+            "target/package/${package}.tar.gz.sha256"
+          )
+
+          if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
+            gh release upload "${TAG_NAME}" "${assets[@]}" --clobber
+          else
+            gh release create "${TAG_NAME}" "${assets[@]}" \
+              --title "GameEase ${TAG_NAME}" \
+              --generate-notes
+          fi
