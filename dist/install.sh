@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN_SRC="$ROOT_DIR/target/release/gameease"
+BIN_SRC="$ROOT_DIR/gameease"
 BIN_DST="/usr/local/bin/gameease"
 UDEV_SRC="$ROOT_DIR/dist/99-gameease.rules"
 UDEV_DST="/etc/udev/rules.d/99-gameease.rules"
@@ -14,9 +14,11 @@ step() {
     printf '\n==> %s\n' "$1"
 }
 
-step "Building release binary"
-cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml"
-printf 'Built %s\n' "$BIN_SRC"
+if [[ ! -x "$BIN_SRC" ]]; then
+    printf 'Error: release binary not found at %s\n' "$BIN_SRC" >&2
+    printf 'Run this installer from an extracted GameEase release archive.\n' >&2
+    exit 1
+fi
 
 step "Installing binary to $BIN_DST"
 sudo install -Dm755 "$BIN_SRC" "$BIN_DST"

@@ -19,31 +19,44 @@ compatibility is untested.
 
 ## Installation
 
-### Prerequisites
+### Runtime packages
 
-Install:
+Install the native runtime libraries before installing GameEase.
 
-- Rust toolchain
-- `libgtk-4-dev`
-- `libgtk4-layer-shell-dev`
-- `libudev-dev`
-- `libxkbcommon-dev`
-
-Package names vary by distribution. On Arch-based systems the native packages
-are typically:
+On Arch-based systems:
 
 ```sh
-sudo pacman -S rust gtk4 gtk4-layer-shell systemd-libs libxkbcommon
+sudo pacman -S gtk4 gtk4-layer-shell libpulse libxkbcommon systemd-libs networkmanager bluez
 ```
 
-### One-line install
+On Debian/Ubuntu-based systems, install the equivalent runtime packages:
+
+```sh
+sudo apt install libgtk-4-1 libgtk4-layer-shell0 libpulse0 libudev1 libxkbcommon0 network-manager bluez
+```
+
+Package names vary by distribution.
+
+### Install from a release
+
+Download the latest `gameease-vX.Y.Z-linux-x86_64.tar.gz` and matching
+`.sha256` file from the GitHub Releases page, then verify and extract it:
+
+```sh
+sha256sum -c gameease-vX.Y.Z-linux-x86_64.tar.gz.sha256
+tar -xzf gameease-vX.Y.Z-linux-x86_64.tar.gz
+cd gameease-vX.Y.Z-linux-x86_64
+```
+
+Install the bundled binary, udev rule, and systemd user service:
 
 ```sh
 bash dist/install.sh
 ```
 
-The installer builds the release binary, installs it to `/usr/local/bin/gameease`,
-installs the udev rule, and enables `gameease.service` as a systemd user unit.
+The installer copies the bundled `gameease` binary to `/usr/local/bin/gameease`,
+installs the udev rule, reloads udev, and enables `gameease.service` as a
+systemd user unit.
 
 The service defaults to:
 
@@ -54,27 +67,31 @@ Environment=WAYLAND_DISPLAY=wayland-1
 Adjust `~/.config/systemd/user/gameease.service` if your compositor uses a
 different Wayland socket.
 
-### Manual testing
+### Verify the install
 
 From a supported Wayland compositor such as KDE Plasma/KWin, Sway, or Hyprland:
-
-```sh
-cargo run
-```
-
-The overlay is anchored to the bottom-left edge, uses the overlay layer, does
-not reserve compositor space, and does not request keyboard focus. This keeps
-the currently focused application as the target for injected uinput key events.
-
-To verify installation:
 
 ```sh
 systemctl --user status gameease.service
 journalctl --user -u gameease.service -e
 ```
 
-Open a text field in another application, show the OSK, and click a key. The
+Open a text field in another application, show the OSK, and activate a key. The
 text should appear in the focused application, not in GameEase.
+
+To manually run the installed binary for testing:
+
+```sh
+/usr/local/bin/gameease
+```
+
+### Uninstall
+
+From the extracted release directory:
+
+```sh
+bash dist/uninstall.sh
+```
 
 ## Controls
 
@@ -149,12 +166,4 @@ Check logs:
 
 ```sh
 journalctl --user -u gameease.service -e
-```
-
-If the linker reports undefined `gtk_layer_*` symbols while building, force Cargo
-to rerun the native layer-shell build script:
-
-```sh
-cargo clean -p gtk4-layer-shell-sys
-cargo build
 ```
