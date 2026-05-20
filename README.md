@@ -95,12 +95,39 @@ bash dist/uninstall.sh
 
 ## Controls
 
-- South + Select toggles the OSK.
-- Start + Select toggles the side menu.
-- Select moves the visible OSK between the bottom and top of the screen.
-- D-pad moves the selected OSK key.
-- South activates the selected OSK key when the OSK is visible.
-- When the side menu is open, D-pad moves the selected row and South activates it.
+- Select + South toggles the OSK.
+- Select + North toggles the side menu.
+- Select + Start toggles Desktop Mode.
+- East closes the OSK and side menu.
+
+When the OSK is visible:
+
+- D-pad moves the selected key.
+- South activates the selected key.
+- North inputs Space.
+- West inputs Backspace.
+- Right Trigger inputs Enter.
+- Left Trigger holds Shift.
+- Left Stick Click toggles Caps Lock.
+- Select moves the OSK between the bottom and top of the screen.
+
+When the side menu is visible:
+
+- D-pad Up/Down moves the selected row or item.
+- D-pad Left/Right adjusts sliders such as volume and configuration values.
+- South activates the selected row or item.
+- East closes the active panel or side menu.
+- North toggles scanning in Wi-Fi and Bluetooth panels.
+- West terminates the selected app in the task switcher when supported.
+
+When Desktop Mode is enabled:
+
+- Right Stick moves the pointer.
+- Right Trigger holds left click.
+- Left Trigger holds right click.
+- Left Stick scrolls.
+- D-pad sends arrow keys.
+- Right Stick Click sends middle click.
 
 `gilrs` reads from `/dev/input`, so gamepad events continue to arrive even when
 the overlay window has no focus.
