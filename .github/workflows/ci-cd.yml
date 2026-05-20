@@ -31,6 +31,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential \
+            dpkg-dev \
             git \
             libgtk-4-dev \
             libpulse-dev \
@@ -88,6 +89,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential \
+            dpkg-dev \
             git \
             libgtk-4-dev \
             libpulse-dev \
@@ -127,6 +129,9 @@ jobs:
           set -euo pipefail
 
           package="gameease-${TAG_NAME}-linux-x86_64"
+          deb_version="${TAG_NAME#v}"
+          deb_package="gameease_${deb_version}_amd64"
+          deb_root="target/package/${deb_package}"
           mkdir -p "target/package/${package}"
 
           install -Dm755 target/release/gameease "target/package/${package}/gameease"
@@ -135,6 +140,83 @@ jobs:
 
           tar -C target/package -czf "target/package/${package}.tar.gz" "${package}"
           sha256sum "target/package/${package}.tar.gz" > "target/package/${package}.tar.gz.sha256"
+
+          rm -rf "${deb_root}"
+          mkdir -p "${deb_root}/DEBIAN" "${deb_root}/usr/lib/x86_64-linux-gnu"
+          install -Dm755 target/release/gameease "${deb_root}/usr/bin/gameease"
+          install -Dm644 README.md "${deb_root}/usr/share/doc/gameease/README.md"
+          install -Dm644 dist/99-gameease.rules "${deb_root}/etc/udev/rules.d/99-gameease.rules"
+          install -Dm644 dist/gameease.service "${deb_root}/usr/lib/systemd/user/gameease.service"
+          sed -i 's#/usr/local/bin/gameease#/usr/bin/gameease#' \
+            "${deb_root}/usr/lib/systemd/user/gameease.service"
+          gtk_layer_shell_libdir="$(pkg-config --variable=libdir gtk4-layer-shell-0)"
+          cp -a "${gtk_layer_shell_libdir}"/libgtk4-layer-shell.so.* \
+            "${deb_root}/usr/lib/x86_64-linux-gnu/"
+
+          cat > "${deb_root}/DEBIAN/control" <<EOF
+          Package: gameease
+          Version: ${deb_version}
+          Section: utils
+          Priority: optional
+          Architecture: amd64
+          Maintainer: GameEase maintainers
+          Depends: libc6, libgtk-4-1, libpulse0, libudev1, libxkbcommon0, network-manager, bluez
+          Description: Gamepad-first Wayland overlay
+           GameEase provides an on-screen keyboard, side menu, desktop mode,
+           and system controls for gamepad-first Linux desktop use.
+          EOF
+
+          cat > "${deb_root}/DEBIAN/postinst" <<'EOF'
+          #!/usr/bin/env sh
+          set -e
+
+          if command -v udevadm >/dev/null 2>&1; then
+              udevadm control --reload || true
+              udevadm trigger --subsystem-match=misc --attr-match=name=uinput || true
+          fi
+
+          if command -v ldconfig >/dev/null 2>&1; then
+              ldconfig || true
+          fi
+
+          if command -v systemctl >/dev/null 2>&1; then
+              systemctl --user daemon-reload >/dev/null 2>&1 || true
+          fi
+          EOF
+
+          cat > "${deb_root}/DEBIAN/prerm" <<'EOF'
+          #!/usr/bin/env sh
+          set -e
+
+          if command -v systemctl >/dev/null 2>&1; then
+              systemctl --user disable --now gameease.service >/dev/null 2>&1 || true
+          fi
+          EOF
+
+          cat > "${deb_root}/DEBIAN/postrm" <<'EOF'
+          #!/usr/bin/env sh
+          set -e
+
+          if command -v udevadm >/dev/null 2>&1; then
+              udevadm control --reload || true
+              udevadm trigger --subsystem-match=misc --attr-match=name=uinput || true
+          fi
+
+          if command -v ldconfig >/dev/null 2>&1; then
+              ldconfig || true
+          fi
+
+          if command -v systemctl >/dev/null 2>&1; then
+              systemctl --user daemon-reload >/dev/null 2>&1 || true
+          fi
+          EOF
+
+          chmod 755 "${deb_root}/DEBIAN/postinst" \
+            "${deb_root}/DEBIAN/prerm" \
+            "${deb_root}/DEBIAN/postrm"
+
+          dpkg-deb --build --root-owner-group "${deb_root}" "target/package/${deb_package}.deb"
+          sha256sum "target/package/${deb_package}.deb" > "target/package/${deb_package}.deb.sha256"
 
       - name: Publish GitHub Release
         env:
@@ -147,6 +229,8 @@ jobs:
           assets=(
             "target/package/${package}.tar.gz"
             "target/package/${package}.tar.gz.sha256"
+            "target/package/gameease_${TAG_NAME#v}_amd64.deb"
+            "target/package/gameease_${TAG_NAME#v}_amd64.deb.sha256"
           )
 
           if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
