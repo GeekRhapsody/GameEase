@@ -7,7 +7,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use tokio::sync::mpsc;
-use zbus::{interface, Connection, Proxy};
+use x11rb::connection::Connection as X11Connection;
+use x11rb::protocol::xproto::{
+    Atom, AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt as X11ProtoConnectionExt,
+    EventMask, GetPropertyReply, StackMode, Window,
+};
+use zbus::{interface, Connection as DBusConnection, Proxy};
 
 /// A visible application or game window exposed by the compositor.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -34,6 +39,7 @@ impl TaskManager {
 
         for backend in backend_candidates() {
             let result = match backend {
+                Backend::X11 => list_x11_tasks(),
                 Backend::Hyprland => list_hyprland_tasks(),
                 Backend::Sway => list_sway_tasks(),
                 Backend::KWin => list_kwin_tasks(),
@@ -56,6 +62,7 @@ impl TaskManager {
         let (backend, id) = split_task_id(task_id)?;
 
         match backend {
+            Backend::X11 => focus_x11_task(id),
             Backend::Hyprland => run_status_for_backend(
                 backend,
                 "hyprctl",
@@ -83,6 +90,7 @@ impl TaskManager {
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Backend {
+    X11,
     Hyprland,
     Sway,
     KWin,
@@ -91,6 +99,7 @@ enum Backend {
 impl Backend {
     fn name(self) -> &'static str {
         match self {
+            Backend::X11 => "X11",
             Backend::Hyprland => "Hyprland",
             Backend::Sway => "Sway",
             Backend::KWin => "KWin",
@@ -144,6 +153,9 @@ struct KWinTask {
 fn backend_candidates() -> Vec<Backend> {
     let mut candidates = Vec::new();
 
+    if is_x11_session() {
+        candidates.push(Backend::X11);
+    }
     if is_kde_session() {
         candidates.push(Backend::KWin);
     }
@@ -161,6 +173,9 @@ fn backend_candidates() -> Vec<Backend> {
     }
     if !candidates.contains(&Backend::KWin) {
         candidates.push(Backend::KWin);
+    }
+    if !candidates.contains(&Backend::X11) && x11_display_available() {
+        candidates.push(Backend::X11);
     }
     if !candidates.contains(&Backend::Hyprland) {
         candidates.push(Backend::Hyprland);
@@ -253,6 +268,261 @@ fn list_kwin_tasks() -> Result<Vec<TaskEntry>> {
     Ok(tasks)
 }
 
+fn list_x11_tasks() -> Result<Vec<TaskEntry>> {
+    let (connection, screen_num) =
+        x11rb::connect(None).context("failed to connect to the X11 display")?;
+    let root = connection.setup().roots[screen_num].root;
+    let atoms = X11TaskAtoms::new(&connection)?;
+    let active_window = x11_property_u32s(
+        &connection,
+        root,
+        atoms.net_active_window,
+        AtomEnum::WINDOW.into(),
+    )
+    .ok()
+    .and_then(|windows| windows.into_iter().next());
+    let windows = x11_property_u32s(
+        &connection,
+        root,
+        atoms.net_client_list_stacking,
+        AtomEnum::WINDOW.into(),
+    )
+    .or_else(|_| {
+        x11_property_u32s(
+            &connection,
+            root,
+            atoms.net_client_list,
+            AtomEnum::WINDOW.into(),
+        )
+    })
+    .context("X11 window manager did not expose a client list")?;
+
+    let current_pid = process::id();
+    let mut tasks = windows
+        .into_iter()
+        .filter_map(|window| {
+            x11_task_for_window(&connection, &atoms, window, active_window).ok()?
+        })
+        .filter(|task| task.pid != Some(current_pid))
+        .collect::<Vec<_>>();
+
+    sort_tasks(&mut tasks);
+    Ok(tasks)
+}
+
+fn x11_task_for_window<C: X11Connection>(
+    connection: &C,
+    atoms: &X11TaskAtoms,
+    window: Window,
+    active_window: Option<Window>,
+) -> Result<Option<TaskEntry>> {
+    if x11_should_skip_window(connection, atoms, window)? {
+        return Ok(None);
+    }
+
+    let title = x11_window_title(connection, atoms, window)?.unwrap_or_default();
+    let app_id = x11_window_class(connection, window)?.unwrap_or_default();
+    if title.is_empty() && app_id.is_empty() {
+        return Ok(None);
+    }
+
+    let pid = x11_property_u32s(
+        connection,
+        window,
+        atoms.net_wm_pid,
+        AtomEnum::CARDINAL.into(),
+    )
+    .ok()
+    .and_then(|values| values.into_iter().next());
+
+    Ok(Some(TaskEntry {
+        id: format!("x11:0x{window:x}"),
+        title: if title.is_empty() {
+            app_id.clone()
+        } else {
+            title
+        },
+        app_id,
+        pid,
+        active: active_window == Some(window),
+    }))
+}
+
+fn x11_should_skip_window<C: X11Connection>(
+    connection: &C,
+    atoms: &X11TaskAtoms,
+    window: Window,
+) -> Result<bool> {
+    let states = x11_property_u32s(
+        connection,
+        window,
+        atoms.net_wm_state,
+        AtomEnum::ATOM.into(),
+    )
+    .unwrap_or_default();
+    if states.contains(&atoms.net_wm_state_skip_taskbar) {
+        return Ok(true);
+    }
+
+    let window_types = x11_property_u32s(
+        connection,
+        window,
+        atoms.net_wm_window_type,
+        AtomEnum::ATOM.into(),
+    )
+    .unwrap_or_default();
+    Ok(window_types
+        .iter()
+        .any(|window_type| atoms.skip_window_types.contains(window_type)))
+}
+
+fn x11_window_title<C: X11Connection>(
+    connection: &C,
+    atoms: &X11TaskAtoms,
+    window: Window,
+) -> Result<Option<String>> {
+    x11_property_string(connection, window, atoms.net_wm_name, atoms.utf8_string).or_else(|_| {
+        x11_property_string(
+            connection,
+            window,
+            AtomEnum::WM_NAME.into(),
+            AtomEnum::STRING.into(),
+        )
+    })
+}
+
+fn x11_window_class<C: X11Connection>(connection: &C, window: Window) -> Result<Option<String>> {
+    let Some(raw_class) = x11_property_string(
+        connection,
+        window,
+        AtomEnum::WM_CLASS.into(),
+        AtomEnum::STRING.into(),
+    )?
+    else {
+        return Ok(None);
+    };
+
+    Ok(raw_class
+        .split('\0')
+        .filter(|part| !part.is_empty())
+        .next_back()
+        .map(str::to_string))
+}
+
+fn x11_property_string<C: X11Connection>(
+    connection: &C,
+    window: Window,
+    property: Atom,
+    property_type: Atom,
+) -> Result<Option<String>> {
+    let reply = x11_property(connection, window, property, property_type)?;
+    if reply.value.is_empty() {
+        return Ok(None);
+    }
+
+    let value = String::from_utf8_lossy(&reply.value)
+        .trim_end_matches('\0')
+        .trim()
+        .to_string();
+    Ok((!value.is_empty()).then_some(value))
+}
+
+fn x11_property_u32s<C: X11Connection>(
+    connection: &C,
+    window: Window,
+    property: Atom,
+    property_type: Atom,
+) -> Result<Vec<u32>> {
+    let reply = x11_property(connection, window, property, property_type)?;
+    Ok(reply
+        .value32()
+        .map(|values| values.collect())
+        .unwrap_or_default())
+}
+
+fn x11_property<C: X11Connection>(
+    connection: &C,
+    window: Window,
+    property: Atom,
+    property_type: Atom,
+) -> Result<GetPropertyReply> {
+    connection
+        .get_property(false, window, property, property_type, 0, u32::MAX)?
+        .reply()
+        .context("failed to read X11 window property")
+}
+
+fn focus_x11_task(task_id: &str) -> Result<()> {
+    let window = parse_x11_window(task_id)?;
+    let (connection, screen_num) =
+        x11rb::connect(None).context("failed to connect to the X11 display")?;
+    let root = connection.setup().roots[screen_num].root;
+    let atoms = X11TaskAtoms::new(&connection)?;
+
+    send_x11_state_request(
+        &connection,
+        root,
+        window,
+        atoms.net_wm_state,
+        0,
+        atoms.net_wm_state_hidden,
+        0,
+    )?;
+    connection.configure_window(
+        window,
+        &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
+    )?;
+    let event = ClientMessageEvent::new(
+        32,
+        window,
+        atoms.net_active_window,
+        [2, x11rb::CURRENT_TIME, 0, 0, 0],
+    );
+    connection.send_event(
+        false,
+        root,
+        EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+        event,
+    )?;
+    connection.flush()?;
+
+    Ok(())
+}
+
+fn send_x11_state_request<C: X11Connection>(
+    connection: &C,
+    root: Window,
+    window: Window,
+    net_wm_state: Atom,
+    action: u32,
+    first_atom: Atom,
+    second_atom: Atom,
+) -> Result<()> {
+    let event = ClientMessageEvent::new(
+        32,
+        window,
+        net_wm_state,
+        [action, first_atom, second_atom, 1, 0],
+    );
+    connection.send_event(
+        false,
+        root,
+        EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+        event,
+    )?;
+    Ok(())
+}
+
+fn parse_x11_window(task_id: &str) -> Result<Window> {
+    let id = task_id.strip_prefix("x11:").unwrap_or(task_id);
+    if let Some(hex) = id.strip_prefix("0x") {
+        u32::from_str_radix(hex, 16).with_context(|| format!("invalid X11 window id {task_id}"))
+    } else {
+        id.parse::<u32>()
+            .with_context(|| format!("invalid X11 window id {task_id}"))
+    }
+}
+
 fn collect_sway_tasks(node: &SwayNode, tasks: &mut Vec<TaskEntry>) {
     let app_id = node
         .app_id
@@ -299,7 +569,9 @@ fn sort_tasks(tasks: &mut [TaskEntry]) {
 }
 
 fn split_task_id(task_id: &str) -> Result<(Backend, &str)> {
-    if let Some(id) = task_id.strip_prefix("hypr:") {
+    if let Some(id) = task_id.strip_prefix("x11:") {
+        Ok((Backend::X11, id))
+    } else if let Some(id) = task_id.strip_prefix("hypr:") {
         Ok((Backend::Hyprland, id))
     } else if let Some(id) = task_id.strip_prefix("sway:") {
         Ok((Backend::Sway, id))
@@ -383,9 +655,63 @@ fn backend_env(backend: Backend) -> Vec<(&'static str, String)> {
         Backend::Sway if env::var_os("SWAYSOCK").is_none() => discover_sway_socket()
             .map(|socket| vec![("SWAYSOCK", socket)])
             .unwrap_or_default(),
+        Backend::X11 => Vec::new(),
         Backend::KWin => Vec::new(),
         _ => Vec::new(),
     }
+}
+
+struct X11TaskAtoms {
+    net_active_window: Atom,
+    net_client_list: Atom,
+    net_client_list_stacking: Atom,
+    net_wm_name: Atom,
+    net_wm_pid: Atom,
+    net_wm_state: Atom,
+    net_wm_state_hidden: Atom,
+    net_wm_state_skip_taskbar: Atom,
+    net_wm_window_type: Atom,
+    skip_window_types: Vec<Atom>,
+    utf8_string: Atom,
+}
+
+impl X11TaskAtoms {
+    fn new<C: X11Connection>(connection: &C) -> Result<Self> {
+        Ok(Self {
+            net_active_window: intern_x11_atom(connection, "_NET_ACTIVE_WINDOW")?,
+            net_client_list: intern_x11_atom(connection, "_NET_CLIENT_LIST")?,
+            net_client_list_stacking: intern_x11_atom(connection, "_NET_CLIENT_LIST_STACKING")?,
+            net_wm_name: intern_x11_atom(connection, "_NET_WM_NAME")?,
+            net_wm_pid: intern_x11_atom(connection, "_NET_WM_PID")?,
+            net_wm_state: intern_x11_atom(connection, "_NET_WM_STATE")?,
+            net_wm_state_hidden: intern_x11_atom(connection, "_NET_WM_STATE_HIDDEN")?,
+            net_wm_state_skip_taskbar: intern_x11_atom(connection, "_NET_WM_STATE_SKIP_TASKBAR")?,
+            net_wm_window_type: intern_x11_atom(connection, "_NET_WM_WINDOW_TYPE")?,
+            skip_window_types: vec![
+                intern_x11_atom(connection, "_NET_WM_WINDOW_TYPE_DESKTOP")?,
+                intern_x11_atom(connection, "_NET_WM_WINDOW_TYPE_DOCK")?,
+                intern_x11_atom(connection, "_NET_WM_WINDOW_TYPE_TOOLBAR")?,
+                intern_x11_atom(connection, "_NET_WM_WINDOW_TYPE_MENU")?,
+                intern_x11_atom(connection, "_NET_WM_WINDOW_TYPE_UTILITY")?,
+                intern_x11_atom(connection, "_NET_WM_WINDOW_TYPE_SPLASH")?,
+                intern_x11_atom(connection, "_NET_WM_WINDOW_TYPE_DROPDOWN_MENU")?,
+                intern_x11_atom(connection, "_NET_WM_WINDOW_TYPE_POPUP_MENU")?,
+                intern_x11_atom(connection, "_NET_WM_WINDOW_TYPE_TOOLTIP")?,
+                intern_x11_atom(connection, "_NET_WM_WINDOW_TYPE_NOTIFICATION")?,
+                intern_x11_atom(connection, "_NET_WM_WINDOW_TYPE_COMBO")?,
+                intern_x11_atom(connection, "_NET_WM_WINDOW_TYPE_DND")?,
+            ],
+            utf8_string: intern_x11_atom(connection, "UTF8_STRING")?,
+        })
+    }
+}
+
+fn intern_x11_atom<C: X11Connection>(connection: &C, name: &str) -> Result<Atom> {
+    Ok(connection
+        .intern_atom(false, name.as_bytes())?
+        .reply()
+        .with_context(|| format!("failed to intern X11 atom {name}"))?
+        .atom)
 }
 
 const KWIN_BRIDGE_PATH: &str = "/org/gameease/KWinBridge";
@@ -461,7 +787,7 @@ fn run_kwin_script(body: &str) -> Result<String> {
 }
 
 async fn run_kwin_script_async(body: &str) -> Result<String> {
-    let connection = Connection::session()
+    let connection = DBusConnection::session()
         .await
         .context("failed to connect to the session D-Bus")?;
     let service = connection
@@ -628,6 +954,21 @@ fn is_kde_session() -> bool {
         || env_contains("XDG_CURRENT_DESKTOP", "PLASMA")
         || env_contains("DESKTOP_SESSION", "plasma")
         || env::var_os("KDE_SESSION_VERSION").is_some()
+}
+
+fn is_x11_session() -> bool {
+    env::var("XDG_SESSION_TYPE")
+        .map(|session_type| session_type.eq_ignore_ascii_case("x11"))
+        .unwrap_or(false)
+        || env_contains("XDG_CURRENT_DESKTOP", "CINNAMON")
+        || env_contains("DESKTOP_SESSION", "cinnamon")
+}
+
+fn x11_display_available() -> bool {
+    env::var_os("DISPLAY").is_some()
+        && env::var("XDG_SESSION_TYPE")
+            .map(|session_type| !session_type.eq_ignore_ascii_case("wayland"))
+            .unwrap_or_else(|_| env::var_os("WAYLAND_DISPLAY").is_none())
 }
 
 fn env_contains(key: &str, needle: &str) -> bool {

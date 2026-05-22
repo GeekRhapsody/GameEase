@@ -31,35 +31,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential \
-            dpkg-dev \
-            git \
             libgtk-4-dev \
             libpulse-dev \
             libudev-dev \
-            libwayland-dev \
             libxkbcommon-dev \
-            meson \
-            ninja-build \
             pkg-config \
-            wayland-protocols
-
-      - name: Build GTK4 layer shell
-        run: |
-          set -euo pipefail
-
-          git clone --depth 1 --branch "${GTK4_LAYER_SHELL_VERSION}" \
-            https://github.com/wmww/gtk4-layer-shell.git /tmp/gtk4-layer-shell
-          meson setup /tmp/gtk4-layer-shell/build /tmp/gtk4-layer-shell \
-            --prefix=/usr \
-            -Dexamples=false \
-            -Ddocs=false \
-            -Dtests=false \
-            -Dintrospection=false \
-            -Dvapi=false
-          ninja -C /tmp/gtk4-layer-shell/build
-          sudo ninja -C /tmp/gtk4-layer-shell/build install
-          sudo ldconfig
-          pkg-config --modversion gtk4-layer-shell-0
+            libx11-dev
 
       - name: Check formatting
         run: cargo fmt --check
@@ -89,13 +66,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential \
+            curl \
             dpkg-dev \
+            file \
             git \
             libgtk-4-dev \
             libpulse-dev \
             libudev-dev \
             libwayland-dev \
             libxkbcommon-dev \
+            libx11-dev \
             meson \
             ninja-build \
             pkg-config \
@@ -132,6 +112,8 @@ jobs:
           deb_version="${TAG_NAME#v}"
           deb_package="gameease_${deb_version}_amd64"
           deb_root="target/package/${deb_package}"
+          appimage_name="GameEase-${TAG_NAME}-x86_64.AppImage"
+          appdir="target/appimage/GameEase.AppDir"
           mkdir -p "target/package/${package}"
 
           install -Dm755 target/release/gameease "target/package/${package}/gameease"
@@ -218,6 +200,33 @@ jobs:
           dpkg-deb --build --root-owner-group "${deb_root}" "target/package/${deb_package}.deb"
           sha256sum "target/package/${deb_package}.deb" > "target/package/${deb_package}.deb.sha256"
 
+          rm -rf "${appdir}"
+          install -Dm755 target/release/gameease "${appdir}/usr/bin/gameease"
+          install -Dm755 dist/appimage/AppRun "${appdir}/AppRun"
+          install -Dm644 dist/appimage/gameease.desktop "${appdir}/gameease.desktop"
+          install -Dm644 assets/Menu.png "${appdir}/gameease.png"
+          install -Dm644 assets/Menu.png \
+            "${appdir}/usr/share/icons/hicolor/128x128/apps/gameease.png"
+          install -Dm644 README.md "${appdir}/usr/share/doc/gameease/README.md"
+          mkdir -p "${appdir}/usr/share/gameease"
+          cp -a dist "${appdir}/usr/share/gameease/dist"
+          mkdir -p "${appdir}/usr/lib/x86_64-linux-gnu"
+          cp -a "${gtk_layer_shell_libdir}"/libgtk4-layer-shell.so.* \
+            "${appdir}/usr/lib/x86_64-linux-gnu/"
+
+          curl -L \
+            -o target/appimagetool \
+            https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x target/appimagetool
+          ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 \
+            target/appimagetool "${appdir}" "target/package/${appimage_name}"
+          sha256sum "target/package/${appimage_name}" > "target/package/${appimage_name}.sha256"
+
+          install -Dm755 dist/install-appimage.sh "target/package/install-appimage.sh"
+          install -Dm755 dist/uninstall-appimage.sh "target/package/uninstall-appimage.sh"
+          sha256sum "target/package/install-appimage.sh" > "target/package/install-appimage.sh.sha256"
+          sha256sum "target/package/uninstall-appimage.sh" > "target/package/uninstall-appimage.sh.sha256"
+
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -231,6 +240,12 @@ jobs:
             "target/package/${package}.tar.gz.sha256"
             "target/package/gameease_${TAG_NAME#v}_amd64.deb"
             "target/package/gameease_${TAG_NAME#v}_amd64.deb.sha256"
+            "target/package/GameEase-${TAG_NAME}-x86_64.AppImage"
+            "target/package/GameEase-${TAG_NAME}-x86_64.AppImage.sha256"
+            "target/package/install-appimage.sh"
+            "target/package/install-appimage.sh.sha256"
+            "target/package/uninstall-appimage.sh"
+            "target/package/uninstall-appimage.sh.sha256"
           )
 
           if gh release view "${TAG_NAME}" >/dev/null 2>&1; then

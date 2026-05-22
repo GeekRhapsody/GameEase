@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=GameEase
+Comment=Gamepad-first Linux overlay
+Exec=gameease
+Icon=gameease
+Categories=Utility;Accessibility;
+Terminal=false

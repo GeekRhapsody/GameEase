@@ -1,21 +1,24 @@
 # GameEase
 
-GameEase is a Linux Wayland overlay for gamepad-first desktop control.
+GameEase is a Linux overlay for gamepad-first desktop control.
 
-It creates a `wlr-layer-shell` overlay window with an on-screen keyboard and a
-slide-in side menu. A background `gilrs` thread reads gamepad input independently
-of window focus, and the OSK injects keys through Linux uinput.
+On Wayland it creates a `wlr-layer-shell` overlay window. On X11 it uses a
+fullscreen, transparent, click-through overlay window with X11 window-manager
+hints for Cinnamon and other EWMH-compatible desktops. A background `gilrs`
+thread reads gamepad input independently of window focus, and the OSK injects
+keys through Linux uinput.
 
 ## Target platform
 
 - Linux
 - Wayland compositor with layer-shell support, including KDE Plasma/KWin, Sway,
   and Hyprland
+- X11 desktop with an EWMH-compatible window manager, including Cinnamon
 - GTK4
-- `wlr-layer-shell`
+- `wlr-layer-shell` for the Wayland backend
 
-GNOME is not supported because it does not expose `wlr-layer-shell`. Gamescope
-compatibility is untested.
+GNOME Wayland is not supported because it does not expose `wlr-layer-shell`.
+Gamescope compatibility is untested.
 
 ## Installation
 
@@ -26,21 +29,53 @@ Install the native runtime libraries before installing GameEase.
 On Arch-based systems:
 
 ```sh
-sudo pacman -S gtk4 gtk4-layer-shell libpulse libxkbcommon systemd-libs networkmanager bluez
+sudo pacman -S gtk4 libpulse libxkbcommon systemd-libs networkmanager bluez
 ```
+
+Install `gtk4-layer-shell` as well if you want to use the Wayland layer-shell
+backend from the portable archive.
 
 On Debian/Ubuntu-based systems, install the equivalent runtime packages:
 
 ```sh
-sudo apt install libgtk-4-1 libgtk4-layer-shell0 libpulse0 libudev1 libxkbcommon0 network-manager bluez
+sudo apt install libgtk-4-1 libpulse0 libudev1 libxkbcommon0 network-manager bluez
 ```
 
-Package names vary by distribution.
+Package names vary by distribution. GameEase only loads `gtk4-layer-shell` when
+running on Wayland, so Cinnamon/X11 does not require that library. Debian and
+Linux Mint users should prefer the `.deb` release package for Wayland sessions
+because it bundles the `gtk4-layer-shell` runtime library that is missing from
+some standard repositories.
 
 ### Install from a release
 
-Download the latest `gameease-vX.Y.Z-linux-x86_64.tar.gz` and matching
-`.sha256` file from the GitHub Releases page, then verify and extract it:
+On Debian, Ubuntu, Linux Mint, and related systems, download the latest
+`gameease_X.Y.Z_amd64.deb` from the GitHub Releases page and install it:
+
+```sh
+sudo apt install ./gameease_X.Y.Z_amd64.deb
+systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XAUTHORITY XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE
+systemctl --user enable --now gameease.service
+```
+
+To use the AppImage, download `GameEase-vX.Y.Z-x86_64.AppImage`,
+`install-appimage.sh`, and their matching `.sha256` files. Verify the downloads,
+then install the AppImage, udev rule, and user service:
+
+```sh
+sha256sum -c GameEase-vX.Y.Z-x86_64.AppImage.sha256
+sha256sum -c install-appimage.sh.sha256
+chmod +x GameEase-vX.Y.Z-x86_64.AppImage install-appimage.sh
+bash install-appimage.sh ./GameEase-vX.Y.Z-x86_64.AppImage
+```
+
+The AppImage bundles GameEase and the `gtk4-layer-shell` runtime library used by
+Wayland layer-shell sessions. It still requires the native runtime packages
+listed above, and the installer script is still needed for uinput permissions
+and autostart.
+
+For the portable archive, download `gameease-vX.Y.Z-linux-x86_64.tar.gz` and
+the matching `.sha256` file, then verify and extract it:
 
 ```sh
 sha256sum -c gameease-vX.Y.Z-linux-x86_64.tar.gz.sha256
@@ -54,22 +89,16 @@ Install the bundled binary, udev rule, and systemd user service:
 bash dist/install.sh
 ```
 
-The installer copies the bundled `gameease` binary to `/usr/local/bin/gameease`,
-installs the udev rule, reloads udev, and enables `gameease.service` as a
-systemd user unit.
-
-The service defaults to:
-
-```ini
-Environment=WAYLAND_DISPLAY=wayland-1
-```
-
-Adjust `~/.config/systemd/user/gameease.service` if your compositor uses a
-different Wayland socket.
+The archive installer copies the bundled `gameease` binary to
+`/usr/local/bin/gameease`, installs the udev rule, reloads udev, imports the
+active display environment, and enables `gameease.service` as a systemd user
+unit. The portable archive expects `gtk4-layer-shell` to be available only for
+Wayland layer-shell sessions; Cinnamon/X11 can run without it.
 
 ### Verify the install
 
-From a supported Wayland compositor such as KDE Plasma/KWin, Sway, or Hyprland:
+From a supported session such as Cinnamon on X11, KDE Plasma/KWin, Sway, or
+Hyprland:
 
 ```sh
 systemctl --user status gameease.service
@@ -82,7 +111,7 @@ text should appear in the focused application, not in GameEase.
 To manually run the installed binary for testing:
 
 ```sh
-/usr/local/bin/gameease
+gameease
 ```
 
 ### Uninstall
@@ -91,6 +120,12 @@ From the extracted release directory:
 
 ```sh
 bash dist/uninstall.sh
+```
+
+For AppImage installs, download `uninstall-appimage.sh` from the release and run:
+
+```sh
+bash uninstall-appimage.sh
 ```
 
 ## Controls
@@ -138,10 +173,13 @@ input. The grab is released again when both overlay surfaces are hidden.
 
 ## Known Limitations
 
-- GNOME is not supported.
 - Gamescope is untested.
-- The systemd unit assumes `WAYLAND_DISPLAY=wayland-1`.
-- The task switcher currently supports KDE Plasma/KWin, Sway, and Hyprland.
+- GNOME Wayland is not supported.
+- X11 overlay stacking depends on the window manager and compositor. Cinnamon is
+  supported; unusual override-redirect fullscreen windows may still draw above
+  the overlay.
+- The task switcher currently supports X11/EWMH, KDE Plasma/KWin, Sway, and
+  Hyprland.
 
 ## Troubleshooting
 
@@ -180,11 +218,13 @@ journalctl --user -u gameease.service -e
 
 ### Overlay does not appear
 
-Confirm that you are running a wlroots-based Wayland compositor and that the
-service has the right Wayland socket:
+Confirm that the service has the right display environment for your session:
 
 ```sh
+echo "$XDG_SESSION_TYPE"
+echo "$DISPLAY"
 echo "$WAYLAND_DISPLAY"
+systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XAUTHORITY XDG_SESSION_TYPE
 systemctl --user edit gameease.service
 systemctl --user restart gameease.service
 ```

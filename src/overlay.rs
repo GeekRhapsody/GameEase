@@ -1,13 +1,21 @@
 use std::cell::{Cell, RefCell};
+use std::ffi::CString;
 use std::rc::Rc;
 use std::sync::mpsc::{Receiver, Sender};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use gtk::cairo;
 use gtk::glib;
+use gtk::glib::translate::ToGlibPtr;
 use gtk::prelude::*;
 use gtk4 as gtk;
-use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
+use libloading::Library;
+use x11rb::connection::Connection;
+use x11rb::protocol::xproto::{
+    Atom, AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt as X11ProtoConnectionExt,
+    EventMask, PropMode, StackMode, Window,
+};
+use x11rb::wrapper::ConnectionExt as X11WrapperConnectionExt;
 
 use crate::gamepad::{GamepadCommand, GamepadGrabCommand, SideMenuCommand};
 use crate::keyboard::{self, OnScreenKeyboard};
@@ -16,11 +24,25 @@ use crate::uinput::SharedVirtualKeyboard;
 
 const OSK_EDGE_GAP: i32 = 50;
 const NOTIFICATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const GTK_LAYER_SHELL_EDGE_LEFT: i32 = 0;
+const GTK_LAYER_SHELL_EDGE_RIGHT: i32 = 1;
+const GTK_LAYER_SHELL_EDGE_TOP: i32 = 2;
+const GTK_LAYER_SHELL_EDGE_BOTTOM: i32 = 3;
+const GTK_LAYER_SHELL_KEYBOARD_MODE_NONE: i32 = 0;
+const GTK_LAYER_SHELL_KEYBOARD_MODE_ON_DEMAND: i32 = 2;
+const GTK_LAYER_SHELL_LAYER_OVERLAY: i32 = 3;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum KeyboardPlacement {
     Bottom,
     Top,
+}
+
+#[derive(Clone)]
+enum OverlayBackend {
+    WaylandLayerShell(Rc<LayerShellApi>),
+    X11,
+    Unsupported,
 }
 
 #[derive(Clone)]
@@ -30,13 +52,96 @@ struct DesktopModeNotification {
     generation: Rc<Cell<u64>>,
 }
 
+type GtkLayerInitForWindow = unsafe extern "C" fn(*mut gtk::ffi::GtkWindow);
+type GtkLayerSetNamespace = unsafe extern "C" fn(*mut gtk::ffi::GtkWindow, *const std::ffi::c_char);
+type GtkLayerSetLayer = unsafe extern "C" fn(*mut gtk::ffi::GtkWindow, i32);
+type GtkLayerSetAnchor =
+    unsafe extern "C" fn(*mut gtk::ffi::GtkWindow, i32, gtk::glib::ffi::gboolean);
+type GtkLayerSetExclusiveZone = unsafe extern "C" fn(*mut gtk::ffi::GtkWindow, i32);
+type GtkLayerSetKeyboardMode = unsafe extern "C" fn(*mut gtk::ffi::GtkWindow, i32);
+
+struct LayerShellApi {
+    _library: Library,
+    init_for_window: GtkLayerInitForWindow,
+    set_namespace: GtkLayerSetNamespace,
+    set_layer: GtkLayerSetLayer,
+    set_anchor: GtkLayerSetAnchor,
+    set_exclusive_zone: GtkLayerSetExclusiveZone,
+    set_keyboard_mode: GtkLayerSetKeyboardMode,
+}
+
+impl LayerShellApi {
+    fn load() -> Result<Self> {
+        let library = unsafe { Library::new("libgtk4-layer-shell.so.0") }
+            .context("failed to load libgtk4-layer-shell.so.0")?;
+
+        let init_for_window =
+            unsafe { *library.get::<GtkLayerInitForWindow>(b"gtk_layer_init_for_window\0")? };
+        let set_namespace =
+            unsafe { *library.get::<GtkLayerSetNamespace>(b"gtk_layer_set_namespace\0")? };
+        let set_layer = unsafe { *library.get::<GtkLayerSetLayer>(b"gtk_layer_set_layer\0")? };
+        let set_anchor = unsafe { *library.get::<GtkLayerSetAnchor>(b"gtk_layer_set_anchor\0")? };
+        let set_exclusive_zone =
+            unsafe { *library.get::<GtkLayerSetExclusiveZone>(b"gtk_layer_set_exclusive_zone\0")? };
+        let set_keyboard_mode =
+            unsafe { *library.get::<GtkLayerSetKeyboardMode>(b"gtk_layer_set_keyboard_mode\0")? };
+
+        Ok(Self {
+            _library: library,
+            init_for_window,
+            set_namespace,
+            set_layer,
+            set_anchor,
+            set_exclusive_zone,
+            set_keyboard_mode,
+        })
+    }
+
+    fn init_overlay_window(&self, window: &gtk::ApplicationWindow) -> Result<()> {
+        let namespace = CString::new("gameease").context("invalid layer-shell namespace")?;
+        unsafe {
+            let window_ptr = gtk_window_ptr(window);
+            (self.init_for_window)(window_ptr);
+            (self.set_namespace)(window_ptr, namespace.as_ptr());
+            (self.set_layer)(window_ptr, GTK_LAYER_SHELL_LAYER_OVERLAY);
+            (self.set_anchor)(
+                window_ptr,
+                GTK_LAYER_SHELL_EDGE_BOTTOM,
+                gtk::glib::ffi::GTRUE,
+            );
+            (self.set_anchor)(window_ptr, GTK_LAYER_SHELL_EDGE_LEFT, gtk::glib::ffi::GTRUE);
+            (self.set_anchor)(
+                window_ptr,
+                GTK_LAYER_SHELL_EDGE_RIGHT,
+                gtk::glib::ffi::GTRUE,
+            );
+            (self.set_anchor)(window_ptr, GTK_LAYER_SHELL_EDGE_TOP, gtk::glib::ffi::GTRUE);
+            (self.set_exclusive_zone)(window_ptr, 0);
+            (self.set_keyboard_mode)(window_ptr, GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
+        }
+
+        Ok(())
+    }
+
+    fn set_keyboard_mode(&self, window: &gtk::ApplicationWindow, mode: i32) {
+        unsafe {
+            (self.set_keyboard_mode)(gtk_window_ptr(window), mode);
+        }
+    }
+}
+
+fn gtk_window_ptr(window: &gtk::ApplicationWindow) -> *mut gtk::ffi::GtkWindow {
+    let window: &gtk::Window = window.upcast_ref();
+    window.to_glib_none().0
+}
+
 impl DesktopModeNotification {
     fn revealer(&self) -> &gtk::Revealer {
         &self.revealer
     }
 }
 
-/// Builds and presents the layer-shell overlay window.
+/// Builds the overlay window for the active GTK backend.
 pub fn build_window(
     application: &gtk::Application,
     gamepad_receiver: Receiver<GamepadCommand>,
@@ -60,15 +165,7 @@ pub fn build_window(
         .build();
     window.add_css_class("gameease-window");
 
-    window.init_layer_shell();
-    window.set_namespace(Some("gameease"));
-    window.set_layer(Layer::Overlay);
-    window.set_anchor(Edge::Bottom, true);
-    window.set_anchor(Edge::Left, true);
-    window.set_anchor(Edge::Right, true);
-    window.set_anchor(Edge::Top, true);
-    window.set_exclusive_zone(0);
-    window.set_keyboard_mode(KeyboardMode::None);
+    let _backend = configure_overlay_backend(&window);
 
     let keyboard_controller = Rc::new(RefCell::new(None::<OnScreenKeyboard>));
     let keyboard_widget = Rc::new(RefCell::new(None::<gtk::Grid>));
@@ -204,6 +301,191 @@ fn screen_size() -> (i32, i32) {
     let geometry = first_monitor.geometry();
 
     (geometry.width(), geometry.height())
+}
+
+fn configure_overlay_backend(window: &gtk::ApplicationWindow) -> OverlayBackend {
+    let backend = detect_overlay_backend();
+
+    match &backend {
+        OverlayBackend::WaylandLayerShell(api) => {
+            if let Err(error) = api.init_overlay_window(window) {
+                eprintln!("Failed to initialise layer-shell overlay: {error:#}");
+            }
+        }
+        OverlayBackend::X11 => install_x11_overlay_hooks(window),
+        OverlayBackend::Unsupported => {
+            eprintln!(
+                "GameEase is running on an unsupported GTK backend; overlay behavior may be limited"
+            );
+        }
+    }
+
+    backend
+}
+
+fn detect_overlay_backend() -> OverlayBackend {
+    let Some(display) = gtk::gdk::Display::default() else {
+        return OverlayBackend::Unsupported;
+    };
+    let backend = display.backend();
+
+    if backend.is_wayland() {
+        match LayerShellApi::load() {
+            Ok(api) => OverlayBackend::WaylandLayerShell(Rc::new(api)),
+            Err(error) => {
+                eprintln!(
+                    "Wayland layer-shell backend is unavailable because gtk4-layer-shell could not be loaded: {error:#}"
+                );
+                OverlayBackend::Unsupported
+            }
+        }
+    } else if backend.is_x11() {
+        OverlayBackend::X11
+    } else {
+        OverlayBackend::Unsupported
+    }
+}
+
+fn set_window_keyboard_mode(window: &gtk::ApplicationWindow, mode: i32) {
+    if let OverlayBackend::WaylandLayerShell(api) = detect_overlay_backend() {
+        api.set_keyboard_mode(window, mode);
+    }
+}
+
+fn is_x11_display_backend() -> bool {
+    gtk::gdk::Display::default()
+        .map(|display| display.backend().is_x11())
+        .unwrap_or(false)
+}
+
+fn install_x11_overlay_hooks(window: &gtk::ApplicationWindow) {
+    let window_for_realize = window.clone();
+    window.connect_realize(move |_| {
+        apply_x11_overlay_hints(&window_for_realize);
+    });
+
+    let window_for_map = window.clone();
+    window.connect_map(move |_| {
+        window_for_map.fullscreen();
+        apply_x11_overlay_hints(&window_for_map);
+    });
+}
+
+fn apply_x11_overlay_hints(window: &gtk::ApplicationWindow) {
+    let Some(surface) = window.surface() else {
+        return;
+    };
+    let Ok(x11_surface) = surface.downcast::<gdk4_x11::X11Surface>() else {
+        return;
+    };
+    let xid = x11_surface.xid();
+    let Ok(window_id) = u32::try_from(xid) else {
+        eprintln!("X11 overlay window id is out of range: {xid}");
+        return;
+    };
+
+    x11_surface.set_skip_taskbar_hint(true);
+    x11_surface.set_skip_pager_hint(true);
+    x11_surface.set_utf8_property("WM_WINDOW_ROLE", Some("gameease-overlay"));
+
+    if let Err(error) = apply_x11_ewmh_hints(window_id) {
+        eprintln!("Failed to apply X11 overlay hints: {error:#}");
+    }
+}
+
+fn apply_x11_ewmh_hints(window: Window) -> anyhow::Result<()> {
+    let (connection, screen_num) = x11rb::connect(None)?;
+    let root = connection.setup().roots[screen_num].root;
+    let atoms = X11Atoms::new(&connection)?;
+
+    connection.change_property32(
+        PropMode::REPLACE,
+        window,
+        atoms.net_wm_state,
+        AtomEnum::ATOM,
+        &[
+            atoms.net_wm_state_above,
+            atoms.net_wm_state_sticky,
+            atoms.net_wm_state_skip_taskbar,
+            atoms.net_wm_state_skip_pager,
+            atoms.net_wm_state_fullscreen,
+        ],
+    )?;
+    connection.change_property32(
+        PropMode::REPLACE,
+        window,
+        atoms.net_wm_window_type,
+        AtomEnum::ATOM,
+        &[atoms.net_wm_window_type_dock],
+    )?;
+
+    send_x11_state_request(
+        &connection,
+        root,
+        window,
+        atoms.net_wm_state,
+        atoms.net_wm_state_above,
+        atoms.net_wm_state_sticky,
+    )?;
+    connection.configure_window(
+        window,
+        &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
+    )?;
+    connection.flush()?;
+
+    Ok(())
+}
+
+fn send_x11_state_request<C: Connection>(
+    connection: &C,
+    root: Window,
+    window: Window,
+    net_wm_state: Atom,
+    first_atom: Atom,
+    second_atom: Atom,
+) -> anyhow::Result<()> {
+    let event =
+        ClientMessageEvent::new(32, window, net_wm_state, [1, first_atom, second_atom, 1, 0]);
+    connection.send_event(
+        false,
+        root,
+        EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+        event,
+    )?;
+    Ok(())
+}
+
+struct X11Atoms {
+    net_wm_state: Atom,
+    net_wm_state_above: Atom,
+    net_wm_state_fullscreen: Atom,
+    net_wm_state_skip_pager: Atom,
+    net_wm_state_skip_taskbar: Atom,
+    net_wm_state_sticky: Atom,
+    net_wm_window_type: Atom,
+    net_wm_window_type_dock: Atom,
+}
+
+impl X11Atoms {
+    fn new<C: Connection>(connection: &C) -> anyhow::Result<Self> {
+        Ok(Self {
+            net_wm_state: intern_x11_atom(connection, "_NET_WM_STATE")?,
+            net_wm_state_above: intern_x11_atom(connection, "_NET_WM_STATE_ABOVE")?,
+            net_wm_state_fullscreen: intern_x11_atom(connection, "_NET_WM_STATE_FULLSCREEN")?,
+            net_wm_state_skip_pager: intern_x11_atom(connection, "_NET_WM_STATE_SKIP_PAGER")?,
+            net_wm_state_skip_taskbar: intern_x11_atom(connection, "_NET_WM_STATE_SKIP_TASKBAR")?,
+            net_wm_state_sticky: intern_x11_atom(connection, "_NET_WM_STATE_STICKY")?,
+            net_wm_window_type: intern_x11_atom(connection, "_NET_WM_WINDOW_TYPE")?,
+            net_wm_window_type_dock: intern_x11_atom(connection, "_NET_WM_WINDOW_TYPE_DOCK")?,
+        })
+    }
+}
+
+fn intern_x11_atom<C: Connection>(connection: &C, name: &str) -> anyhow::Result<Atom> {
+    Ok(connection
+        .intern_atom(false, name.as_bytes())?
+        .reply()?
+        .atom)
 }
 
 fn build_desktop_mode_notification() -> DesktopModeNotification {
@@ -406,7 +688,7 @@ fn update_keyboard_entry_focus(
     if sidemenu.is_keyboard_entry_active() {
         window.set_can_focus(true);
         window.set_focusable(true);
-        window.set_keyboard_mode(KeyboardMode::OnDemand);
+        set_window_keyboard_mode(window, GTK_LAYER_SHELL_KEYBOARD_MODE_ON_DEMAND);
         if !keyboard.get_visible() {
             keyboard.set_visible(true);
         }
@@ -430,7 +712,7 @@ fn update_keyboard_entry_focus(
             sidemenu_for_timeout.focus_keyboard_entry();
         });
     } else {
-        window.set_keyboard_mode(KeyboardMode::None);
+        set_window_keyboard_mode(window, GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
         window.set_focusable(false);
         window.set_can_focus(false);
     }
@@ -689,6 +971,10 @@ fn update_overlay_visibility(
 
     if overlay_visible {
         window.present();
+        if is_x11_display_backend() {
+            window.fullscreen();
+            apply_x11_overlay_hints(window);
+        }
         schedule_input_region_update(window, keyboard, sidemenu);
     } else {
         window.hide();

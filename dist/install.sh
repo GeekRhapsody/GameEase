@@ -32,6 +32,13 @@ printf 'Installed udev rule and reloaded udev\n'
 
 step "Installing systemd user unit to $SERVICE_DST"
 install -Dm644 "$SERVICE_SRC" "$SERVICE_DST"
+systemctl --user import-environment \
+    DISPLAY \
+    WAYLAND_DISPLAY \
+    XAUTHORITY \
+    XDG_CURRENT_DESKTOP \
+    XDG_SESSION_DESKTOP \
+    XDG_SESSION_TYPE || true
 systemctl --user daemon-reload
 systemctl --user enable --now gameease.service
 printf 'Enabled and started gameease.service\n'
@@ -44,7 +51,8 @@ If the overlay does not appear, check:
   systemctl --user status gameease.service
   journalctl --user -u gameease.service -e
 
-The unit defaults to WAYLAND_DISPLAY=wayland-1. Edit:
+If the overlay does not appear because the service cannot see your display, edit:
   ~/.config/systemd/user/gameease.service
-if your compositor uses a different Wayland socket.
+or import your session environment with:
+  systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XAUTHORITY XDG_SESSION_TYPE
 MSG

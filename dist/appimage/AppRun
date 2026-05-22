@@ -1,0 +1,13 @@
+#!/usr/bin/env sh
+set -eu
+
+SELF="$0"
+if command -v readlink >/dev/null 2>&1; then
+    SELF="$(readlink -f "$0")"
+fi
+
+APPDIR="${APPDIR:-$(dirname "$SELF")}"
+
+export LD_LIBRARY_PATH="$APPDIR/usr/lib:$APPDIR/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+exec "$APPDIR/usr/bin/gameease" "$@"
