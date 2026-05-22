@@ -72,7 +72,16 @@ bash install-appimage.sh ./GameEase-vX.Y.Z-x86_64.AppImage
 The AppImage bundles GameEase and the `gtk4-layer-shell` runtime library used by
 Wayland layer-shell sessions. It still requires the native runtime packages
 listed above, and the installer script is still needed for uinput permissions
-and autostart.
+and autostart. The AppImage installer checks `/dev/uinput` before starting the
+service; if it reports that your user cannot write to `/dev/uinput`, add your
+user to the `input` group and log out completely before trying again:
+
+```sh
+sudo usermod -aG input "$USER"
+```
+
+The installer writes a log to `~/.cache/gameease/install-appimage.log`, so you
+can inspect the result even if a file-manager-launched terminal closes.
 
 For the portable archive, download `gameease-vX.Y.Z-linux-x86_64.tar.gz` and
 the matching `.sha256` file, then verify and extract it:
@@ -190,7 +199,9 @@ Install the udev rule:
 ```sh
 sudo install -Dm644 dist/99-gameease.rules /etc/udev/rules.d/99-gameease.rules
 sudo udevadm control --reload
+sudo modprobe uinput
 sudo udevadm trigger --subsystem-match=misc --attr-match=name=uinput
+sudo udevadm settle
 ```
 
 You can also add your user to the `input` group:
@@ -200,6 +211,12 @@ sudo usermod -aG input $USER
 ```
 
 Log out and back in after changing group membership.
+
+Verify that the current login session can use uinput:
+
+```sh
+test -w /dev/uinput && echo ok
+```
 
 ### Game still receives gamepad input while the overlay is visible
 
