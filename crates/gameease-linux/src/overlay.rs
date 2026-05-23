@@ -4,6 +4,7 @@ use std::rc::Rc;
 use std::sync::mpsc::{Receiver, Sender};
 
 use anyhow::{Context, Result};
+use gameease_core::OverlayBackend as CoreOverlayBackend;
 use gtk::cairo;
 use gtk::glib;
 use gtk::glib::translate::ToGlibPtr;
@@ -20,7 +21,9 @@ use x11rb::wrapper::ConnectionExt as X11WrapperConnectionExt;
 use crate::gamepad::{GamepadCommand, GamepadGrabCommand, SideMenuCommand};
 use crate::keyboard::{self, OnScreenKeyboard};
 use crate::sidemenu::{self, SideMenu, SideMenuAction};
+use crate::system::LinuxSystemBackend;
 use crate::uinput::SharedVirtualKeyboard;
+use gameease_core::SystemBackend;
 
 const OSK_EDGE_GAP: i32 = 50;
 const NOTIFICATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -39,7 +42,7 @@ enum KeyboardPlacement {
 }
 
 #[derive(Clone)]
-enum OverlayBackend {
+enum PlatformOverlayBackend {
     WaylandLayerShell(Rc<LayerShellApi>),
     X11,
     Unsupported,
@@ -141,6 +144,20 @@ impl DesktopModeNotification {
     }
 }
 
+impl CoreOverlayBackend for PlatformOverlayBackend {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::WaylandLayerShell(_) => "wayland-layer-shell",
+            Self::X11 => "x11",
+            Self::Unsupported => "unsupported",
+        }
+    }
+
+    fn supports_overlay(&self) -> bool {
+        matches!(self, Self::WaylandLayerShell(_) | Self::X11)
+    }
+}
+
 /// Builds the overlay window for the active GTK backend.
 pub fn build_window(
     application: &gtk::Application,
@@ -150,7 +167,8 @@ pub fn build_window(
     virtual_keyboard: SharedVirtualKeyboard,
 ) -> Result<gtk::ApplicationWindow> {
     install_overlay_css();
-    let app_config = crate::config::load_config_or_default();
+    let system_backend = LinuxSystemBackend;
+    let app_config = system_backend.load_config();
 
     let window = gtk::ApplicationWindow::builder()
         .application(application)
@@ -303,17 +321,17 @@ fn screen_size() -> (i32, i32) {
     (geometry.width(), geometry.height())
 }
 
-fn configure_overlay_backend(window: &gtk::ApplicationWindow) -> OverlayBackend {
+fn configure_overlay_backend(window: &gtk::ApplicationWindow) -> PlatformOverlayBackend {
     let backend = detect_overlay_backend();
 
     match &backend {
-        OverlayBackend::WaylandLayerShell(api) => {
+        PlatformOverlayBackend::WaylandLayerShell(api) => {
             if let Err(error) = api.init_overlay_window(window) {
                 eprintln!("Failed to initialise layer-shell overlay: {error:#}");
             }
         }
-        OverlayBackend::X11 => install_x11_overlay_hooks(window),
-        OverlayBackend::Unsupported => {
+        PlatformOverlayBackend::X11 => install_x11_overlay_hooks(window),
+        PlatformOverlayBackend::Unsupported => {
             eprintln!(
                 "GameEase is running on an unsupported GTK backend; overlay behavior may be limited"
             );
@@ -323,31 +341,31 @@ fn configure_overlay_backend(window: &gtk::ApplicationWindow) -> OverlayBackend 
     backend
 }
 
-fn detect_overlay_backend() -> OverlayBackend {
+fn detect_overlay_backend() -> PlatformOverlayBackend {
     let Some(display) = gtk::gdk::Display::default() else {
-        return OverlayBackend::Unsupported;
+        return PlatformOverlayBackend::Unsupported;
     };
     let backend = display.backend();
 
     if backend.is_wayland() {
         match LayerShellApi::load() {
-            Ok(api) => OverlayBackend::WaylandLayerShell(Rc::new(api)),
+            Ok(api) => PlatformOverlayBackend::WaylandLayerShell(Rc::new(api)),
             Err(error) => {
                 eprintln!(
                     "Wayland layer-shell backend is unavailable because gtk4-layer-shell could not be loaded: {error:#}"
                 );
-                OverlayBackend::Unsupported
+                PlatformOverlayBackend::Unsupported
             }
         }
     } else if backend.is_x11() {
-        OverlayBackend::X11
+        PlatformOverlayBackend::X11
     } else {
-        OverlayBackend::Unsupported
+        PlatformOverlayBackend::Unsupported
     }
 }
 
 fn set_window_keyboard_mode(window: &gtk::ApplicationWindow, mode: i32) {
-    if let OverlayBackend::WaylandLayerShell(api) = detect_overlay_backend() {
+    if let PlatformOverlayBackend::WaylandLayerShell(api) = detect_overlay_backend() {
         api.set_keyboard_mode(window, mode);
     }
 }

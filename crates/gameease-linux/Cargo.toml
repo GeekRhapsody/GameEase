@@ -1,0 +1,28 @@
+[package]
+name = "gameease-linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "gameease"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+evdev.workspace = true
+gameease-core = { path = "../gameease-core" }
+gdk4-x11 = "0.11"
+gilrs = "0.11"
+gtk4 = "0.11"
+ksni = { version = "0.3.4", default-features = false, features = ["blocking", "tokio"] }
+libloading = "0.8"
+libpulse-binding = "2"
+libpulse-glib-binding = "2"
+serde.workspace = true
+serde_json.workspace = true
+tokio = { version = "1", features = ["full"] }
+uinput = "0.1"
+x11rb = "0.13"
+xkbcommon = { version = "0.9", default-features = false }
+zbus = { version = "4", features = ["tokio"] }

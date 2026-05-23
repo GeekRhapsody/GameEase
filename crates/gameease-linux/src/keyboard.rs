@@ -11,9 +11,9 @@ use gtk::prelude::*;
 use gtk4 as gtk;
 use xkbcommon::xkb;
 
-use crate::config;
 use crate::gamepad::KeyboardDirection;
 use crate::uinput::SharedVirtualKeyboard;
+use gameease_core::config;
 
 const INITIAL_ROW: usize = 2;
 const INITIAL_COLUMN: usize = 6;
@@ -979,14 +979,16 @@ fn embedded_icon_image(name: &str) -> gtk::Image {
 
 fn embedded_icon_bytes(name: &str) -> Option<&'static [u8]> {
     match name {
-        "LT.png" => Some(include_bytes!("../assets/LT.png")),
-        "RT.png" => Some(include_bytes!("../assets/RT.png")),
-        "Share.png" => Some(include_bytes!("../assets/Share.png")),
-        "Left_Stick_Click.png" => Some(include_bytes!("../assets/Left_Stick_Click.png")),
-        "Positional_Prompts_Left.png" => {
-            Some(include_bytes!("../assets/Positional_Prompts_Left.png"))
+        "LT.png" => Some(include_bytes!("../../../assets/LT.png")),
+        "RT.png" => Some(include_bytes!("../../../assets/RT.png")),
+        "Share.png" => Some(include_bytes!("../../../assets/Share.png")),
+        "Left_Stick_Click.png" => Some(include_bytes!("../../../assets/Left_Stick_Click.png")),
+        "Positional_Prompts_Left.png" => Some(include_bytes!(
+            "../../../assets/Positional_Prompts_Left.png"
+        )),
+        "Positional_Prompts_Up.png" => {
+            Some(include_bytes!("../../../assets/Positional_Prompts_Up.png"))
         }
-        "Positional_Prompts_Up.png" => Some(include_bytes!("../assets/Positional_Prompts_Up.png")),
         _ => None,
     }
 }

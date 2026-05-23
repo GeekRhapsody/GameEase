@@ -555,11 +555,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "gameease"
+name = "gameease-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "evdev",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "gameease-linux"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "evdev",
+ "gameease-core",
  "gdk4-x11",
  "gilrs",
  "gtk4",

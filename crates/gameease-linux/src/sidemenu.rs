@@ -9,14 +9,14 @@ use gtk4 as gtk;
 
 use crate::audio::{AudioController, AudioSnapshot, SharedAudioController};
 use crate::bluetooth::{BluetoothDevice, BluetoothEvent, BluetoothManager, BluetoothWorker};
-use crate::config::{
+use crate::gamepad::{GamepadGrabCommand, KeyboardDirection};
+use crate::tasks::{TaskEntry, TaskManager};
+use crate::wifi::{WifiEvent, WifiManager, WifiNetwork, WifiWorker};
+use gameease_core::config::{
     self, AppConfig, DESKTOP_MOUSE_SENSITIVITY_STEP, MAX_DESKTOP_MOUSE_SENSITIVITY, MAX_OSK_SCALE,
     MAX_UI_SCALE, MIN_DESKTOP_MOUSE_SENSITIVITY, MIN_OSK_SCALE, MIN_UI_SCALE, OSK_SCALE_STEP,
     UI_SCALE_STEP,
 };
-use crate::gamepad::{GamepadGrabCommand, KeyboardDirection};
-use crate::tasks::{TaskEntry, TaskManager};
-use crate::wifi::{WifiEvent, WifiManager, WifiNetwork, WifiWorker};
 
 const SIDE_MENU_WIDTH: i32 = 280;
 const WIFI_PANEL_WIDTH: i32 = 360;

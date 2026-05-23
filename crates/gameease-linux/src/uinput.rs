@@ -4,6 +4,8 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use evdev::Key;
+use gameease_core::gamepad::MouseButton;
+use gameease_core::InputBackend;
 use uinput::event::controller::{Controller, Mouse};
 use uinput::event::keyboard::{self, Keyboard};
 use uinput::event::relative::{Position, Wheel};
@@ -14,17 +16,6 @@ pub type SharedVirtualKeyboard = Arc<Mutex<VirtualKeyboard>>;
 /// Thread-shareable virtual mouse handle.
 pub type SharedVirtualMouse = Arc<Mutex<VirtualMouse>>;
 
-/// Mouse buttons emitted by the GameEase virtual mouse.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum MouseButton {
-    /// Primary mouse button.
-    Left,
-    /// Secondary mouse button.
-    Right,
-    /// Middle mouse button.
-    Middle,
-}
-
 /// Virtual keyboard backed by Linux uinput.
 pub struct VirtualKeyboard {
     device: uinput::Device,
@@ -33,6 +24,77 @@ pub struct VirtualKeyboard {
 /// Virtual mouse backed by Linux uinput.
 pub struct VirtualMouse {
     device: uinput::Device,
+}
+
+/// Linux uinput-backed input backend shared with GameEase core.
+pub struct LinuxInputBackend {
+    keyboard: SharedVirtualKeyboard,
+    mouse: SharedVirtualMouse,
+}
+
+impl LinuxInputBackend {
+    /// Creates a Linux input backend from the existing virtual devices.
+    pub fn new(keyboard: SharedVirtualKeyboard, mouse: SharedVirtualMouse) -> Self {
+        Self { keyboard, mouse }
+    }
+}
+
+impl InputBackend for LinuxInputBackend {
+    fn press_key(&self, key: Key) -> Result<()> {
+        self.keyboard
+            .lock()
+            .map_err(|error| anyhow!("virtual keyboard lock poisoned: {error}"))?
+            .press(key)
+    }
+
+    fn release_key(&self, key: Key) -> Result<()> {
+        self.keyboard
+            .lock()
+            .map_err(|error| anyhow!("virtual keyboard lock poisoned: {error}"))?
+            .release(key)
+    }
+
+    fn tap_key(&self, key: Key) -> Result<()> {
+        self.keyboard
+            .lock()
+            .map_err(|error| anyhow!("virtual keyboard lock poisoned: {error}"))?
+            .tap(key)
+    }
+
+    fn move_pointer_relative(&self, dx: i32, dy: i32) -> Result<()> {
+        self.mouse
+            .lock()
+            .map_err(|error| anyhow!("virtual mouse lock poisoned: {error}"))?
+            .move_relative(dx, dy)
+    }
+
+    fn scroll(&self, dy: i32) -> Result<()> {
+        self.mouse
+            .lock()
+            .map_err(|error| anyhow!("virtual mouse lock poisoned: {error}"))?
+            .scroll(dy)
+    }
+
+    fn button_down(&self, button: MouseButton) -> Result<()> {
+        self.mouse
+            .lock()
+            .map_err(|error| anyhow!("virtual mouse lock poisoned: {error}"))?
+            .button_down(button)
+    }
+
+    fn button_up(&self, button: MouseButton) -> Result<()> {
+        self.mouse
+            .lock()
+            .map_err(|error| anyhow!("virtual mouse lock poisoned: {error}"))?
+            .button_up(button)
+    }
+
+    fn click(&self, button: MouseButton) -> Result<()> {
+        self.mouse
+            .lock()
+            .map_err(|error| anyhow!("virtual mouse lock poisoned: {error}"))?
+            .click(button)
+    }
 }
 
 impl VirtualKeyboard {

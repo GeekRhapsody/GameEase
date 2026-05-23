@@ -1,10 +1,10 @@
 mod audio;
 mod bluetooth;
-mod config;
 mod gamepad;
 mod keyboard;
 mod overlay;
 mod sidemenu;
+mod system;
 mod tasks;
 mod tray;
 mod uinput;
