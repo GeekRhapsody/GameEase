@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use evdev::Key;
-use gameease_core::gamepad::MouseButton;
+use gameease_core::gamepad::{KeyCode, MouseButton};
 use gameease_core::InputBackend;
 use uinput::event::controller::{Controller, Mouse};
 use uinput::event::keyboard::{self, Keyboard};
@@ -40,21 +40,24 @@ impl LinuxInputBackend {
 }
 
 impl InputBackend for LinuxInputBackend {
-    fn press_key(&self, key: Key) -> Result<()> {
+    fn press_key(&self, key: KeyCode) -> Result<()> {
+        let key = to_evdev_key(key);
         self.keyboard
             .lock()
             .map_err(|error| anyhow!("virtual keyboard lock poisoned: {error}"))?
             .press(key)
     }
 
-    fn release_key(&self, key: Key) -> Result<()> {
+    fn release_key(&self, key: KeyCode) -> Result<()> {
+        let key = to_evdev_key(key);
         self.keyboard
             .lock()
             .map_err(|error| anyhow!("virtual keyboard lock poisoned: {error}"))?
             .release(key)
     }
 
-    fn tap_key(&self, key: Key) -> Result<()> {
+    fn tap_key(&self, key: KeyCode) -> Result<()> {
+        let key = to_evdev_key(key);
         self.keyboard
             .lock()
             .map_err(|error| anyhow!("virtual keyboard lock poisoned: {error}"))?
@@ -94,6 +97,75 @@ impl InputBackend for LinuxInputBackend {
             .lock()
             .map_err(|error| anyhow!("virtual mouse lock poisoned: {error}"))?
             .click(button)
+    }
+}
+
+fn to_evdev_key(key: KeyCode) -> Key {
+    match key {
+        KeyCode::Escape => Key::KEY_ESC,
+        KeyCode::Grave => Key::KEY_GRAVE,
+        KeyCode::Num1 => Key::KEY_1,
+        KeyCode::Num2 => Key::KEY_2,
+        KeyCode::Num3 => Key::KEY_3,
+        KeyCode::Num4 => Key::KEY_4,
+        KeyCode::Num5 => Key::KEY_5,
+        KeyCode::Num6 => Key::KEY_6,
+        KeyCode::Num7 => Key::KEY_7,
+        KeyCode::Num8 => Key::KEY_8,
+        KeyCode::Num9 => Key::KEY_9,
+        KeyCode::Num0 => Key::KEY_0,
+        KeyCode::Minus => Key::KEY_MINUS,
+        KeyCode::Equal => Key::KEY_EQUAL,
+        KeyCode::A => Key::KEY_A,
+        KeyCode::B => Key::KEY_B,
+        KeyCode::C => Key::KEY_C,
+        KeyCode::D => Key::KEY_D,
+        KeyCode::E => Key::KEY_E,
+        KeyCode::F => Key::KEY_F,
+        KeyCode::G => Key::KEY_G,
+        KeyCode::H => Key::KEY_H,
+        KeyCode::I => Key::KEY_I,
+        KeyCode::J => Key::KEY_J,
+        KeyCode::K => Key::KEY_K,
+        KeyCode::L => Key::KEY_L,
+        KeyCode::M => Key::KEY_M,
+        KeyCode::N => Key::KEY_N,
+        KeyCode::O => Key::KEY_O,
+        KeyCode::P => Key::KEY_P,
+        KeyCode::Q => Key::KEY_Q,
+        KeyCode::R => Key::KEY_R,
+        KeyCode::S => Key::KEY_S,
+        KeyCode::T => Key::KEY_T,
+        KeyCode::U => Key::KEY_U,
+        KeyCode::V => Key::KEY_V,
+        KeyCode::W => Key::KEY_W,
+        KeyCode::X => Key::KEY_X,
+        KeyCode::Y => Key::KEY_Y,
+        KeyCode::Z => Key::KEY_Z,
+        KeyCode::LeftBrace => Key::KEY_LEFTBRACE,
+        KeyCode::RightBrace => Key::KEY_RIGHTBRACE,
+        KeyCode::Backslash => Key::KEY_BACKSLASH,
+        KeyCode::Tab => Key::KEY_TAB,
+        KeyCode::CapsLock => Key::KEY_CAPSLOCK,
+        KeyCode::Semicolon => Key::KEY_SEMICOLON,
+        KeyCode::Apostrophe => Key::KEY_APOSTROPHE,
+        KeyCode::Comma => Key::KEY_COMMA,
+        KeyCode::Dot => Key::KEY_DOT,
+        KeyCode::Slash => Key::KEY_SLASH,
+        KeyCode::Space => Key::KEY_SPACE,
+        KeyCode::Enter => Key::KEY_ENTER,
+        KeyCode::Backspace => Key::KEY_BACKSPACE,
+        KeyCode::LeftShift => Key::KEY_LEFTSHIFT,
+        KeyCode::RightShift => Key::KEY_RIGHTSHIFT,
+        KeyCode::LeftControl => Key::KEY_LEFTCTRL,
+        KeyCode::LeftMeta => Key::KEY_LEFTMETA,
+        KeyCode::LeftAlt => Key::KEY_LEFTALT,
+        KeyCode::RightAlt => Key::KEY_RIGHTALT,
+        KeyCode::Iso102nd => Key::KEY_102ND,
+        KeyCode::Left => Key::KEY_LEFT,
+        KeyCode::Up => Key::KEY_UP,
+        KeyCode::Down => Key::KEY_DOWN,
+        KeyCode::Right => Key::KEY_RIGHT,
     }
 }
 

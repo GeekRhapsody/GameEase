@@ -2,7 +2,6 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use evdev::Key;
 
 use crate::config;
 use crate::traits::InputBackend;
@@ -105,6 +104,139 @@ pub enum MouseButton {
     Right,
     /// Middle mouse button.
     Middle,
+}
+
+/// Keyboard keys emitted by platform input backends.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum KeyCode {
+    /// Escape.
+    Escape,
+    /// Grave/backtick key.
+    Grave,
+    /// Number row 1.
+    Num1,
+    /// Number row 2.
+    Num2,
+    /// Number row 3.
+    Num3,
+    /// Number row 4.
+    Num4,
+    /// Number row 5.
+    Num5,
+    /// Number row 6.
+    Num6,
+    /// Number row 7.
+    Num7,
+    /// Number row 8.
+    Num8,
+    /// Number row 9.
+    Num9,
+    /// Number row 0.
+    Num0,
+    /// Minus.
+    Minus,
+    /// Equal.
+    Equal,
+    /// A-Z letter key.
+    A,
+    /// A-Z letter key.
+    B,
+    /// A-Z letter key.
+    C,
+    /// A-Z letter key.
+    D,
+    /// A-Z letter key.
+    E,
+    /// A-Z letter key.
+    F,
+    /// A-Z letter key.
+    G,
+    /// A-Z letter key.
+    H,
+    /// A-Z letter key.
+    I,
+    /// A-Z letter key.
+    J,
+    /// A-Z letter key.
+    K,
+    /// A-Z letter key.
+    L,
+    /// A-Z letter key.
+    M,
+    /// A-Z letter key.
+    N,
+    /// A-Z letter key.
+    O,
+    /// A-Z letter key.
+    P,
+    /// A-Z letter key.
+    Q,
+    /// A-Z letter key.
+    R,
+    /// A-Z letter key.
+    S,
+    /// A-Z letter key.
+    T,
+    /// A-Z letter key.
+    U,
+    /// A-Z letter key.
+    V,
+    /// A-Z letter key.
+    W,
+    /// A-Z letter key.
+    X,
+    /// A-Z letter key.
+    Y,
+    /// A-Z letter key.
+    Z,
+    /// Left bracket.
+    LeftBrace,
+    /// Right bracket.
+    RightBrace,
+    /// Backslash.
+    Backslash,
+    /// Tab.
+    Tab,
+    /// Caps Lock.
+    CapsLock,
+    /// Semicolon.
+    Semicolon,
+    /// Apostrophe.
+    Apostrophe,
+    /// Comma.
+    Comma,
+    /// Dot/period.
+    Dot,
+    /// Slash.
+    Slash,
+    /// Space.
+    Space,
+    /// Enter.
+    Enter,
+    /// Backspace.
+    Backspace,
+    /// Left Shift.
+    LeftShift,
+    /// Right Shift.
+    RightShift,
+    /// Left Control.
+    LeftControl,
+    /// Left Super/Windows key.
+    LeftMeta,
+    /// Left Alt.
+    LeftAlt,
+    /// Right Alt.
+    RightAlt,
+    /// ISO 102nd key.
+    Iso102nd,
+    /// Left arrow.
+    Left,
+    /// Up arrow.
+    Up,
+    /// Down arrow.
+    Down,
+    /// Right arrow.
+    Right,
 }
 
 /// Gamepad buttons understood by the core gamepad state machine.
@@ -547,13 +679,13 @@ impl DesktopModeState {
             RawGamepadEvent::Press(GamepadButton::RightThumb) => {
                 self.click_mouse(MouseButton::Middle)
             }
-            RawGamepadEvent::Press(GamepadButton::DPadUp) => self.press_dpad(Key::KEY_UP),
+            RawGamepadEvent::Press(GamepadButton::DPadUp) => self.press_dpad(KeyCode::Up),
             RawGamepadEvent::Release(GamepadButton::DPadUp) => self.dpad_up.reset(),
-            RawGamepadEvent::Press(GamepadButton::DPadDown) => self.press_dpad(Key::KEY_DOWN),
+            RawGamepadEvent::Press(GamepadButton::DPadDown) => self.press_dpad(KeyCode::Down),
             RawGamepadEvent::Release(GamepadButton::DPadDown) => self.dpad_down.reset(),
-            RawGamepadEvent::Press(GamepadButton::DPadLeft) => self.press_dpad(Key::KEY_LEFT),
+            RawGamepadEvent::Press(GamepadButton::DPadLeft) => self.press_dpad(KeyCode::Left),
             RawGamepadEvent::Release(GamepadButton::DPadLeft) => self.dpad_left.reset(),
-            RawGamepadEvent::Press(GamepadButton::DPadRight) => self.press_dpad(Key::KEY_RIGHT),
+            RawGamepadEvent::Press(GamepadButton::DPadRight) => self.press_dpad(KeyCode::Right),
             RawGamepadEvent::Release(GamepadButton::DPadRight) => self.dpad_right.reset(),
             RawGamepadEvent::Press(GamepadButton::LeftTrigger2) => {
                 self.set_mouse_button(MouseButton::Right, true)
@@ -609,13 +741,18 @@ impl DesktopModeState {
 
     fn repeat_dpad(&mut self) {
         let now = Instant::now();
-        Self::repeat_dpad_key(&*self.input, &mut self.dpad_up, Key::KEY_UP, now);
-        Self::repeat_dpad_key(&*self.input, &mut self.dpad_down, Key::KEY_DOWN, now);
-        Self::repeat_dpad_key(&*self.input, &mut self.dpad_left, Key::KEY_LEFT, now);
-        Self::repeat_dpad_key(&*self.input, &mut self.dpad_right, Key::KEY_RIGHT, now);
+        Self::repeat_dpad_key(&*self.input, &mut self.dpad_up, KeyCode::Up, now);
+        Self::repeat_dpad_key(&*self.input, &mut self.dpad_down, KeyCode::Down, now);
+        Self::repeat_dpad_key(&*self.input, &mut self.dpad_left, KeyCode::Left, now);
+        Self::repeat_dpad_key(&*self.input, &mut self.dpad_right, KeyCode::Right, now);
     }
 
-    fn repeat_dpad_key(input: &dyn InputBackend, repeat: &mut DpadRepeat, key: Key, now: Instant) {
+    fn repeat_dpad_key(
+        input: &dyn InputBackend,
+        repeat: &mut DpadRepeat,
+        key: KeyCode,
+        now: Instant,
+    ) {
         if !repeat.should_repeat(now) {
             return;
         }
@@ -625,12 +762,12 @@ impl DesktopModeState {
         }
     }
 
-    fn press_dpad(&mut self, key: Key) {
+    fn press_dpad(&mut self, key: KeyCode) {
         let repeat = match key {
-            Key::KEY_UP => &mut self.dpad_up,
-            Key::KEY_DOWN => &mut self.dpad_down,
-            Key::KEY_LEFT => &mut self.dpad_left,
-            Key::KEY_RIGHT => &mut self.dpad_right,
+            KeyCode::Up => &mut self.dpad_up,
+            KeyCode::Down => &mut self.dpad_down,
+            KeyCode::Left => &mut self.dpad_left,
+            KeyCode::Right => &mut self.dpad_right,
             _ => return,
         };
 

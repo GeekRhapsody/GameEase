@@ -1,5 +1,9 @@
 [workspace]
-members = ["crates/gameease-core", "crates/gameease-linux"]
+members = [
+    "crates/gameease-core",
+    "crates/gameease-linux",
+    "crates/gameease-windows",
+]
 resolver = "2"
 
 [workspace.package]

@@ -6,6 +6,5 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-evdev.workspace = true
 serde.workspace = true
 serde_json.workspace = true
