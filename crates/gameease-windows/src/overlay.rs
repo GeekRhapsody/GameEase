@@ -55,7 +55,7 @@ mod imp {
                     height,
                     None,
                     None,
-                    hinstance,
+                    Some(hinstance),
                     Some(null_mut()),
                 )
             }

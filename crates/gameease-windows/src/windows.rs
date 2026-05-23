@@ -11,7 +11,8 @@ mod imp {
     use anyhow::{anyhow, Context};
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
-    use windows::Win32::Foundation::{CloseHandle, BOOL, HWND, LPARAM};
+    use windows::core::BOOL;
+    use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM};
     use windows::Win32::System::Threading::{
         OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
     };
