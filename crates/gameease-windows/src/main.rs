@@ -11,8 +11,9 @@ use gameease_core::gamepad::{GamepadCommand, GamepadGrabCommand, GamepadState, S
 #[cfg(windows)]
 use gameease_windows::{
     WindowsAudioBackend, WindowsBluetoothBackend, WindowsBrightnessBackend, WindowsGamepadBackend,
-    WindowsInputBackend, WindowsSideMenu, WindowsSideMenuHandle, WindowsTaskBackend,
-    WindowsTrayIcon, WindowsTrayNotifier, WindowsWifiBackend,
+    WindowsInputBackend, WindowsOnScreenKeyboard, WindowsOnScreenKeyboardHandle, WindowsSideMenu,
+    WindowsSideMenuHandle, WindowsTaskBackend, WindowsTrayIcon, WindowsTrayNotifier,
+    WindowsWifiBackend,
 };
 
 #[cfg(windows)]
@@ -55,6 +56,8 @@ fn run() -> anyhow::Result<()> {
     let (config_sender, config_receiver) = mpsc::channel::<GamepadGrabCommand>();
     let side_menu = WindowsSideMenu::new(config_sender)?;
     let side_menu_handle = side_menu.handle();
+    let keyboard = WindowsOnScreenKeyboard::new()?;
+    let keyboard_handle = keyboard.handle();
     let input = WindowsInputBackend;
     let _audio = WindowsAudioBackend;
     let _wifi = WindowsWifiBackend::new()?;
@@ -68,6 +71,7 @@ fn run() -> anyhow::Result<()> {
         osk_receiver,
         sidemenu_receiver,
         notifier,
+        keyboard_handle,
         side_menu_handle,
     )?;
     let gamepad_state = GamepadState::new(osk_sender, sidemenu_sender, Box::new(input));
@@ -91,6 +95,7 @@ fn spawn_command_notification_loop(
     osk_receiver: Receiver<GamepadCommand>,
     sidemenu_receiver: Receiver<SideMenuCommand>,
     notifier: WindowsTrayNotifier,
+    keyboard: WindowsOnScreenKeyboardHandle,
     side_menu: WindowsSideMenuHandle,
 ) -> anyhow::Result<thread::JoinHandle<()>> {
     thread::Builder::new()
@@ -102,19 +107,9 @@ fn spawn_command_notification_loop(
                     let _ =
                         notifier.notify("GameEase Desktop Mode", &format!("Desktop Mode {state}"));
                 }
-                Ok(GamepadCommand::ToggleKeyboard) => {
-                    let _ = notifier.notify(
-                        "GameEase",
-                        "The Windows OSK overlay is not available in this build yet.",
-                    );
+                Ok(command) => {
+                    let _ = keyboard.post(command);
                 }
-                Ok(GamepadCommand::ToggleKeyboardPosition) => {
-                    let _ = notifier.notify(
-                        "GameEase",
-                        "The Windows OSK overlay is not available in this build yet.",
-                    );
-                }
-                Ok(_) => {}
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
