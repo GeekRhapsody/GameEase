@@ -150,7 +150,9 @@ pub fn save_config(config: &AppConfig) -> Result<()> {
 
 /// Returns the GameEase configuration file path.
 pub fn config_path() -> Result<PathBuf> {
-    let home = std::env::var_os("HOME").context("HOME is not set")?;
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .context("HOME/USERPROFILE is not set")?;
     Ok(PathBuf::from(home).join(".gameease").join("config.json"))
 }
 

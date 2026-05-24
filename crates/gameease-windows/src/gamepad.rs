@@ -1,7 +1,7 @@
-use std::thread;
+use std::{sync::mpsc::Receiver, thread};
 
 use anyhow::Result;
-use gameease_core::gamepad::GamepadState;
+use gameease_core::gamepad::{GamepadGrabCommand, GamepadState};
 
 /// Windows gamepad backend using XInput through `windows-rs`.
 #[derive(Debug, Default, Clone, Copy)]
@@ -30,9 +30,15 @@ mod imp {
 
     impl WindowsGamepadBackend {
         /// Starts the background XInput polling loop.
-        pub fn spawn_polling_loop(
+        pub fn spawn_polling_loop(&self, state: GamepadState) -> Result<thread::JoinHandle<()>> {
+            self.spawn_polling_loop_with_commands(state, None)
+        }
+
+        /// Starts the background XInput polling loop with runtime commands.
+        pub fn spawn_polling_loop_with_commands(
             &self,
             mut state: GamepadState,
+            command_receiver: Option<Receiver<GamepadGrabCommand>>,
         ) -> Result<thread::JoinHandle<()>> {
             thread::Builder::new()
                 .name("gameease-windows-gamepad".to_string())
@@ -40,6 +46,17 @@ mod imp {
                     let mut previous = [ControllerState::default(); 4];
 
                     loop {
+                        if let Some(receiver) = command_receiver.as_ref() {
+                            while let Ok(command) = receiver.try_recv() {
+                                match command {
+                                    GamepadGrabCommand::SetDesktopMouseSensitivity(sensitivity) => {
+                                        state.set_desktop_mouse_sensitivity(sensitivity);
+                                    }
+                                    GamepadGrabCommand::SetExclusive(_) => {}
+                                }
+                            }
+                        }
+
                         for index in 0..4u32 {
                             poll_controller(index, &mut previous[index as usize], &mut state);
                         }
@@ -203,6 +220,15 @@ mod imp {
 impl WindowsGamepadBackend {
     /// Starts the background gamepad polling loop.
     pub fn spawn_polling_loop(&self, _state: GamepadState) -> Result<thread::JoinHandle<()>> {
+        anyhow::bail!("Windows gamepad backend is only available on Windows")
+    }
+
+    /// Starts the background gamepad polling loop with runtime commands.
+    pub fn spawn_polling_loop_with_commands(
+        &self,
+        _state: GamepadState,
+        _command_receiver: Option<Receiver<GamepadGrabCommand>>,
+    ) -> Result<thread::JoinHandle<()>> {
         anyhow::bail!("Windows gamepad backend is only available on Windows")
     }
 }
